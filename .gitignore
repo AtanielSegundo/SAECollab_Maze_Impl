@@ -1,0 +1,8 @@
+__pycache__/*
+*.pth
+
+plots/*
+!plots/.gitkeep
+
+qtables/*
+!qtables/.gitkeep
