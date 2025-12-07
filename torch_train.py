@@ -29,11 +29,11 @@ print(f"Start: {raw_env.agent_start}")
 print(f"Goal: {raw_env.agent_goal}")
 print(f"{'='*70}\n")
 
-train_state_encoder = StateEncoder.COORDS
+train_state_encoder = StateEncoder.ONE_HOT
 env = MazeGymWrapper(raw_env, train_state_encoder,
-                     num_last_states=2,
-                     possible_actions_feature=True,
-                     visited_count=False
+                     num_last_states=1,            
+                     possible_actions_feature=False,
+                     visited_count=True
                      )
 
 EPISODES    = 200

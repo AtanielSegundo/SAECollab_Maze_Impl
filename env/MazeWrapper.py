@@ -214,6 +214,8 @@ class MazeGymWrapper:
             self.last_actions.append(action.delta)
         
         reward = float(res.reward)
+        if self.visit_count is not None:
+            reward *= (1.0 + self.visit_count[*next_state_coords])
         done = bool(res.isGoal)
 
         self.state = next_state_coords
