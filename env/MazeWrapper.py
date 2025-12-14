@@ -68,7 +68,7 @@ class MazeGymWrapper:
                  num_last_states:int=None,  #Number of before state
                  num_last_actions:int=None, #Number of before actions
                  possible_actions_feature:bool=False, #Enable check neighbours features
-                 visited_count:bool = False
+                 visited_count:bool = False,
                  ):
         self.maze = maze
 
@@ -104,8 +104,8 @@ class MazeGymWrapper:
         if self.possible_actions_feature:
             self.state_size += len(list(Action))
         
-        if self.visit_count is not None:
-            self.state_size += 1
+        # if self.visit_count is not None:
+        #     self.state_size += 1
 
     def encode(self, rc: Tuple[int,int]) -> np.ndarray:
         """
@@ -174,9 +174,9 @@ class MazeGymWrapper:
             actions_reshaped = np.array(action_arr, dtype=np.float32).reshape(1, -1)
             state_encoded = np.concatenate([state_encoded, actions_reshaped], axis=1)
 
-        if self.visit_count is not None:
-            visits_count = self.visit_count[*self.state].reshape(1,-1)
-            state_encoded = np.concatenate([state_encoded, visits_count], axis=1)
+        # if self.visit_count is not None:
+        #     visits_count = self.visit_count[*self.state].reshape(1,-1)
+        #     state_encoded = np.concatenate([state_encoded, visits_count], axis=1)
 
         #print(f"Final state shape: {state_encoded.shape}")
         result = state_encoded.reshape(-1)
@@ -206,7 +206,8 @@ class MazeGymWrapper:
         next_state_coords = tuple(res.nextState)
         
         if self.visit_count is not None:
-            self.visit_count[*next_state_coords] += 1 
+            if next_state_coords[0] != self.state[0] and  next_state_coords[1] != self.state[1]:
+                self.visit_count[*next_state_coords] += 1 
 
         if self.last_states is not None:
             self.last_states.append(next_state_coords)

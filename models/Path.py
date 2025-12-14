@@ -62,10 +62,13 @@ class Path:
         
         return float(similarity)
      
-     def __str__(self):
+     def __str__(self,m:MazeGymWrapper=None):
         _str = ["\n"]
         for i in range(self.len):
-            _str.append(f"{i}: {self.arr[i]}\n")
+            if m is None:
+                _str.append(f"{i}: {self.arr[i]}\n")
+            else :
+                _str.append(f"{i}: {self.arr[i]} [{m.maze.getStateGridCell(self.arr[i])}]\n")
         return "".join(_str)
      
 def get_best_path(env: MazeGymWrapper, agent, max_steps: int = 10000) -> List[Tuple[int,int]]:

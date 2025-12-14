@@ -21,7 +21,8 @@ if not os.path.exists(file_path) or file_path == '':
     exit(-1)
 base_name = os.path.basename(file_path).split(".")[0]
 
-raw_env = MazeEnv(file_path,rewards_scaled=False)
+raw_env = MazeEnv(file_path,rewards_scaled=False,
+                  pass_through_walls=False)
 print(f"\n{'='*70}")
 print(f"MAZE: {base_name}")
 print(f"Size: {raw_env.rows}x{raw_env.cols} ({raw_env.rows * raw_env.cols} células)")
@@ -31,8 +32,9 @@ print(f"{'='*70}\n")
 
 train_state_encoder = StateEncoder.ONE_HOT
 env = MazeGymWrapper(raw_env, train_state_encoder,
-                     num_last_states=1,            
-                     possible_actions_feature=False,
+                     num_last_states=2,  
+                     num_last_actions=2,          
+                     possible_actions_feature=True,
                      visited_count=True
                      )
 
@@ -42,7 +44,7 @@ ACTION_SIZE = env.action_size
 MAX_STEPS   = env.maze.opens_count * ACTION_SIZE
 HIDDEN_SIZE = env.rows * env.cols * env.action_size
 GAMMA = 0.99
-LR = 1e-4
+LR = 1e-5
 
 BATCH_SIZE  = 256
 LEARN_INTERVAL = 4
@@ -65,9 +67,9 @@ print(f"[INFO] A* path length: {a_star_path.len}\n")
 
 policy_arq = nn.Sequential(
     nn.Linear(STATE_SIZE, HIDDEN_SIZE),
-    nn.ReLU(),               
+    nn.GELU(),               
     nn.Linear(HIDDEN_SIZE, HIDDEN_SIZE // 2),
-    nn.ReLU(),
+    nn.GELU(),
     nn.Linear(HIDDEN_SIZE // 2, ACTION_SIZE),
 )
 
