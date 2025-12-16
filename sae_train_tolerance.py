@@ -36,12 +36,11 @@ print(f"Start: {raw_env.agent_start}")
 print(f"Goal: {raw_env.agent_goal}")
 print(f"{'='*70}\n")
 
-train_state_encoder = StateEncoder.ONE_HOT
+train_state_encoder = StateEncoder.COORDS
 env = MazeGymWrapper(raw_env, train_state_encoder,
-                     num_last_states=2,
-                     num_last_actions=2,
+                     num_last_states=1,
                      possible_actions_feature=True,
-                     visited_count=True)
+                     visited_count=False)
 
 # ============================================================================
 # HIPERPARÂMETROS AJUSTADOS
@@ -53,7 +52,7 @@ MAX_STEPS   = env.maze.opens_count * ACTION_SIZE
 
 _HIDDEN_SIZE  = env.rows * env.cols * env.action_size
 
-INITIAL_HIDDEN    = max(128, _HIDDEN_SIZE // 8)
+INITIAL_HIDDEN    = max(128, _HIDDEN_SIZE // 4)
 NEW_BRANCH_HIDDEN = max(16, _HIDDEN_SIZE // 4)
 EXTRA_HIDDEN      = max(16, _HIDDEN_SIZE // 4)
 LAYER_MUTATION_MODE = MutationMode.Hidden
@@ -63,9 +62,9 @@ MAX_BRANCHES = 4
 # RL Hyperparameters
 GAMMA = 0.99
 
-LR = [5e-5, 1e-5] 
+LR = [1e-5, 5e-5] 
 
-BATCH_SIZE = 512
+BATCH_SIZE = 1024
 LEARN_INTERVAL = 4
 LOG_INTERVAL = 10
 BUFFER_SIZE = 100_000
@@ -79,8 +78,7 @@ TARGET_FN = HIDDEN_FN
 PATIENCE = 15  
 MIN_VARIANCE = 0.6
 
-# FIX 3: Número mínimo de goals antes de adicionar camada
-MIN_GOALS_BEFORE_BRANCH = 5  # Precisa ter alcançado goal pelo menos 5 vezes
+MIN_GOALS_BEFORE_BRANCH = 5 
 
 epsilon_decay = exp_decay_factor_to(
     final_epsilon=0.1,
@@ -88,6 +86,8 @@ epsilon_decay = exp_decay_factor_to(
     epsilon_start=1.0,
     convergence_threshold=0.01
 )
+
+print(epsilon_decay)
 
 TEST_INTERVAL = 5
 PATH_TO_GOAL_LEARNED = False
@@ -157,7 +157,7 @@ sae_agent = SAECollabDDQN(
     learn_interval=LEARN_INTERVAL,
     tau=0.005,
     grad_clip=10.0,
-    min_replay_size=1000
+    min_replay_size=max(1000,2*BATCH_SIZE),
 )
 
 sae_initial_params = sum(p.numel() for p in sae_agent.policy_net.parameters())

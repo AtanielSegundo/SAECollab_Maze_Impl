@@ -32,7 +32,7 @@ print(f"Start: {raw_env.agent_start}")
 print(f"Goal: {raw_env.agent_goal}")
 print(f"{'='*70}\n")
 
-train_state_encoder = StateEncoder.COORDS
+train_state_encoder = StateEncoder.ONE_HOT
 env = MazeGymWrapper(raw_env, train_state_encoder,
                      num_last_states=1,
                      possible_actions_feature=True,
@@ -42,20 +42,20 @@ env = MazeGymWrapper(raw_env, train_state_encoder,
 # ============================================================================
 # HIPERPARÂMETROS
 # ============================================================================
-EPISODES    = 300
+EPISODES    = 200
 STATE_SIZE  = env.state_size
 ACTION_SIZE = env.action_size
 MAX_STEPS   = env.maze.opens_count * env.action_size
 
 _HIDDEN_SIZE  = env.rows * env.cols * env.action_size
 
-INITIAL_HIDDEN    = max(128,_HIDDEN_SIZE)
+INITIAL_HIDDEN    = max(128,_HIDDEN_SIZE // 4)
 NEW_BRANCH_HIDDEN = max(16,_HIDDEN_SIZE // 4)
 EXTRA_HIDDEN      = max(16, _HIDDEN_SIZE // 4)
 LAYER_MUTATION_MODE = MutationMode.Hidden
 
-HIDDEN_FN = nn.GELU()
-EXTRA_FN  = nn.GELU()
+HIDDEN_FN = nn.ReLU()
+EXTRA_FN  = nn.Identity()
 TARGET_FN = HIDDEN_FN
 
 NUM_BRANCHES      = 4

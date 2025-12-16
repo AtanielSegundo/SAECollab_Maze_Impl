@@ -30,12 +30,11 @@ print(f"Start: {raw_env.agent_start}")
 print(f"Goal: {raw_env.agent_goal}")
 print(f"{'='*70}\n")
 
-train_state_encoder = StateEncoder.ONE_HOT
+train_state_encoder = StateEncoder.COORDS
 env = MazeGymWrapper(raw_env, train_state_encoder,
-                     num_last_states=2,  
-                     num_last_actions=2,          
+                     num_last_states=1,  
                      possible_actions_feature=True,
-                     visited_count=True
+                     visited_count=False
                      )
 
 EPISODES    = 200
@@ -46,7 +45,7 @@ HIDDEN_SIZE = env.rows * env.cols * env.action_size
 GAMMA = 0.99
 LR = 1e-5
 
-BATCH_SIZE  = 256
+BATCH_SIZE  = 1024
 LEARN_INTERVAL = 4
 LOG_INTERVAL= 10
 
@@ -67,9 +66,9 @@ print(f"[INFO] A* path length: {a_star_path.len}\n")
 
 policy_arq = nn.Sequential(
     nn.Linear(STATE_SIZE, HIDDEN_SIZE),
-    nn.GELU(),               
+    nn.ReLU(),               
     nn.Linear(HIDDEN_SIZE, HIDDEN_SIZE // 2),
-    nn.GELU(),
+    nn.ReLU(),
     nn.Linear(HIDDEN_SIZE // 2, ACTION_SIZE),
 )
 
@@ -92,10 +91,10 @@ agent = TorchDDQN(
     epsilon_final=0.1,
     tau=0.005,
     grad_clip= 10.0,
-    min_replay_size=1000,
+    min_replay_size=max(1000,2*BATCH_SIZE),
     epsilon_decay=epsilon_decay,
     target_update=int(TOTAL_STEPS / 50),
-    buffer_size=BUFFER_SIZE,
+    buffer_size=BUFFER_SIZE
 )
 
 print(f"{'='*70}\n")

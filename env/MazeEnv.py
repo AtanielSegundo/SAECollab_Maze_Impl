@@ -27,7 +27,7 @@ class GridCell(Enum):
     
     @property
     def reward(self):
-        if self is GridCell.OPEN : return -.1
+        if self is GridCell.OPEN : return -.01
         if self is GridCell.WALL : return -.5
         if self is GridCell.GOAL : return 1.0
         if self is GridCell.START: return -.1
