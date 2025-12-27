@@ -275,7 +275,7 @@ class SAECollabDDQN:
                  out_activation: Optional[nn.Module] = None,
                  accelerate_etas: bool = False,
                  # HIPERPARAMETROS RL
-                 lr:float = 1e-3, #TODO Fazer o learning rate ser um vetor para camadas iniciais e ramos novos 
+                 lr:Union[float,List[float]] = 1e-3,
                  gamma:float = 0.99,
                  buffer_size:int = 100000,
                  batch_size:int = 64,
@@ -309,10 +309,12 @@ class SAECollabDDQN:
         # BACKWARD RELATED
         self.lr        = lr
         policy_params  = [p for p in self.policy_net.parameters() if p.requires_grad]
-        self.optimizer = optim.Adam(policy_params, lr=self.lr)
+        _lr = self.lr if isinstance(self.lr,float) else self.lr[0]
+        self.optimizer = optim.Adam(policy_params, lr=_lr)
         self.loss_fn   = nn.HuberLoss()
         self.loss      = 0.0 
 
+        self.layers_added    = 0 
         self.steps_done      = 0
         self.learn_steps     = 0
         
@@ -392,8 +394,12 @@ class SAECollabDDQN:
             is_k_trainable    = is_k_trainable
         )
 
+        self.layers_added += 1
+        _lr = self.lr if isinstance(self.lr,float) else \
+                         self.lr[self.layers_added] if self.layers_added < len(self.lr) else \
+                         self.lr[-1]
         policy_params  = [p for p in self.policy_net.parameters() if p.requires_grad]
-        self.optimizer = optim.Adam(policy_params, lr=self.lr)
+        self.optimizer = optim.Adam(policy_params, lr=_lr)
 
     def learn(self):
         # BUFFER WARMUP
@@ -435,6 +441,7 @@ class SAECollabDDQN:
 
         self.optimizer.zero_grad()
         self.loss.backward()
+        # TODO: REFERENCIAR O VALOR USADO NO GRAD CLIPING
         torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), self.grad_clip)
         self.optimizer.step()
         self.learn_steps += 1 

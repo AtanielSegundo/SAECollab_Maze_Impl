@@ -21,7 +21,8 @@ if not os.path.exists(file_path) or file_path == '':
     exit(-1)
 base_name = os.path.basename(file_path).split(".")[0]
 
-raw_env = MazeEnv(file_path,rewards_scaled=False)
+raw_env = MazeEnv(file_path,rewards_scaled=False,
+                  pass_through_walls=False)
 print(f"\n{'='*70}")
 print(f"MAZE: {base_name}")
 print(f"Size: {raw_env.rows}x{raw_env.cols} ({raw_env.rows * raw_env.cols} células)")
@@ -31,7 +32,7 @@ print(f"{'='*70}\n")
 
 train_state_encoder = StateEncoder.COORDS
 env = MazeGymWrapper(raw_env, train_state_encoder,
-                     num_last_states=2,
+                     num_last_states=1,  
                      possible_actions_feature=True,
                      visited_count=False
                      )
@@ -42,9 +43,9 @@ ACTION_SIZE = env.action_size
 MAX_STEPS   = env.maze.opens_count * ACTION_SIZE
 HIDDEN_SIZE = env.rows * env.cols * env.action_size
 GAMMA = 0.99
-LR = 1e-4
+LR = 1e-5
 
-BATCH_SIZE  = 256
+BATCH_SIZE  = 1024
 LEARN_INTERVAL = 4
 LOG_INTERVAL= 10
 
@@ -90,10 +91,10 @@ agent = TorchDDQN(
     epsilon_final=0.1,
     tau=0.005,
     grad_clip= 10.0,
-    min_replay_size=1000,
+    min_replay_size=max(1000,2*BATCH_SIZE),
     epsilon_decay=epsilon_decay,
     target_update=int(TOTAL_STEPS / 50),
-    buffer_size=BUFFER_SIZE,
+    buffer_size=BUFFER_SIZE
 )
 
 print(f"{'='*70}\n")

@@ -1,13 +1,13 @@
-# MazeEnv.py
+# Combined MazeEnv and MazeGymWrapper with `pass_through_walls` option
 
 import numpy as np
 import os
-
 
 from enum import Enum
 from itertools import product as cartesian
 from collections import namedtuple
 from typing import *
+
 
 class Action(Enum):
     LEFT  = (-1, 0)
@@ -30,7 +30,7 @@ class GridCell(Enum):
         if self is GridCell.OPEN : return -.01
         if self is GridCell.WALL : return -.5
         if self is GridCell.GOAL : return 1.0
-        if self is GridCell.START: return -.01
+        if self is GridCell.START: return -.1
 
 StepResult = namedtuple("StepResult",["reward","nextState","isGoal"])
 
@@ -72,12 +72,19 @@ class Grid:
 		print()
 		for (r,c) in cartesian(range(self.rows),range(self.cols)):
 			print(self.grid[r,c],
-		 		  end="\n" if c == self.cols-1 else "\t")
+				  	end="\n" if c == self.cols-1 else "\t")
 
 class MazeEnv(Grid):
-    def __init__(self,maze_file_path:str,rewards_scaled=False):
+    def __init__(self,maze_file_path:str,rewards_scaled=False, pass_through_walls: bool = False):
+        """If pass_through_walls is True the agent may move into cells that are walls.
+        Behavior:
+         - Movement into WALL cells is allowed (unless out-of-bounds).
+         - WALL cells, when passed-through, are treated as OPEN for reward calculation.
+         - Leaving the grid (out-of-bounds) is still treated as a WALL and blocked.
+        """
         super().__init__(maze_file_path)
         self.rewards_scaled = rewards_scaled
+        self.pass_through_walls = pass_through_walls
         if self.file_loaded:
             coords = np.where(self.grid == GridCell.START.value)
             self.agent_start = (int(coords[0][0]), int(coords[1][0]))
@@ -129,15 +136,24 @@ class MazeEnv(Grid):
         )
 
         if out:
+            # Out of bounds -> treat as wall and block movement regardless of pass_through_walls
             cell_t = GridCell.WALL
             reward = self.getCellReward(cell_t)
             is_goal = False
+            next_state_final = state
         else:
             cell_value = self.grid[next_state[0], next_state[1]]
             cell_t = GridCell(cell_value)
-            reward = self.getCellReward(cell_t)
             is_goal = (cell_t is GridCell.GOAL)
 
-        next_state = state if cell_t is GridCell.WALL else next_state
+            if cell_t is GridCell.WALL:
+                reward = self.getCellReward(GridCell.WALL)
+                if self.pass_through_walls:
+                    next_state_final = next_state
+                else:
+                    next_state_final = state
+            else:
+                reward = self.getCellReward(cell_t)
+                next_state_final = next_state
 
-        return StepResult(reward=reward, nextState=next_state, isGoal=is_goal)
+        return StepResult(reward=reward, nextState=next_state_final, isGoal=is_goal)
