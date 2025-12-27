@@ -1,0 +1,6 @@
+[submodule "DeepLib"]
+	path = DeepLib
+	url = https://github.com/AtanielSegundo/DeepLib
+[submodule "StackedCollab"]
+	path = StackedCollab
+	url = https://github.com/AtanielSegundo/stacked-nn-torch.git
