@@ -12,14 +12,15 @@ class AblationProgramState:
                  extended_info       : dict        = None
     ):
         self.tabular_trainer_path = tabular_trainer_path
-        self.save_dir_path        = save_dir_path
-        self.program_state_path   = os.path.join(self.save_dir_path,self.program_state_path)
         self.seed                 = initial_seed
+        self.save_dir_path        = save_dir_path
+        self.save_dir_path        = os.path.join(self.save_dir_path,str(self.seed))
+        self.program_state_path   = os.path.join(self.save_dir_path,AblationProgramState.STATE_JSON_NAME)
         self.extended             = extended_info or dict()
 
     def env_setup(self):
-        os.makedirs(os.path.join(self.save_dir_path,str(self.seed)))
-        self.save()
+        os.makedirs(self.save_dir_path,exist_ok=True)
+        self.save_json()
 
     def save_json(self):
         data = {
@@ -30,14 +31,15 @@ class AblationProgramState:
             "extended"            : self.extended
         }
         with open(self.program_state_path, 'w') as f:
-            json.dump(data,f,sort_keys = True, indent = 4, ensure_ascii = False)
+            json.dump(data,f, indent = 4, ensure_ascii = False)
     
     @classmethod
-    def load_from_json(cls,dir_path) -> Optional[Self]:
-        if not os.path.exists(dir_path): 
+    def load_from_json(cls,dir_path,seed) -> Optional[Self]:
+        experiment_path = os.path.join(dir_path,str(seed))
+        if not os.path.exists(experiment_path): 
             return None
         
-        state_path = os.path.join(dir_path,Self.STATE_JSON_NAME)
+        state_path = os.path.join(experiment_path,AblationProgramState.STATE_JSON_NAME)
 
         if not os.path.exists(state_path): 
             return None
@@ -56,11 +58,21 @@ class AblationProgramState:
 
         return ablation_state
 
-def experiment_1():
-    pass
+def experiment_1(dir_path:str='experiment_1',seed=333):
+    TABULAR_QLEARNING_PATH = "./c_qlearning/build/agentTrain.exe"
+    state = AblationProgramState.load_from_json(dir_path,seed)
+    
+    if state is None:
+        state = AblationProgramState(
+            TABULAR_QLEARNING_PATH,
+            dir_path,
+            seed
+        )
+        state.env_setup()
+
+    
 
 SELECTABLE_EXPERIMENTS = [experiment_1] 
 
 if __name__ == "__main__":
-
-    pass
+    experiment_1()
