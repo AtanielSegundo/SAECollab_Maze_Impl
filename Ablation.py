@@ -1,6 +1,18 @@
 import os
 import json
+import subprocess
 from typing import *
+
+METRICS_FILE_NAME = "metrics.csv"
+QTABLE_FILE_NAME  = "tabular.qtable"
+
+class GlobalHyperparameters:
+    def __init__(self,learning_rate,discount_factor,epsilon_decay,episodes,max_steps):
+        self.learning_rate = learning_rate
+        self.discount_factor = discount_factor
+        self.epsilon_decay   = epsilon_decay
+        self.episodes        = episodes
+        self.max_steps       = max_steps
 
 class AblationProgramState:
     STATE_JSON_NAME = ".ablation_state.json"
@@ -32,7 +44,33 @@ class AblationProgramState:
         }
         with open(self.program_state_path, 'w') as f:
             json.dump(data,f, indent = 4, ensure_ascii = False)
-    
+
+    def add_save_path_head(self,p:str):
+        self.save_dir_path = os.path.join(self.save_dir_path,p)
+        os.makedirs(self.save_dir_path,exist_ok=True)                
+
+    def remove_save_path_head(self):
+        self.save_dir_path = os.path.dirname(self.save_dir_path)
+ 
+    def train_tabular_agent(self,maze_path:str,hp:GlobalHyperparameters):        
+        tabular_save_path = os.path.join(self.save_dir_path,"tabular")
+        os.makedirs(tabular_save_path,exist_ok=True)
+        subprocess.run(
+            [self.tabular_trainer_path, 
+             maze_path,
+             "--lr", str(hp.learning_rate),
+             "--df", str(hp.discount_factor),
+             "--decay", f"{hp.epsilon_decay}",
+             "--episodes", str(hp.episodes),
+             "--max_steps", str(hp.max_steps),
+             "--seed", str(self.seed),
+             "--qtable_path", f"{os.path.join(tabular_save_path,QTABLE_FILE_NAME)}",
+             "--metrics_path", f"{os.path.join(tabular_save_path,METRICS_FILE_NAME)}",
+            ],
+            check=False,
+            stdout=subprocess.DEVNULL
+        )
+
     @classmethod
     def load_from_json(cls,dir_path,seed) -> Optional[Self]:
         experiment_path = os.path.join(dir_path,str(seed))
@@ -57,22 +95,3 @@ class AblationProgramState:
         ablation_state.extended             = data["extended"]
 
         return ablation_state
-
-def experiment_1(dir_path:str='experiment_1',seed=333):
-    TABULAR_QLEARNING_PATH = "./c_qlearning/build/agentTrain.exe"
-    state = AblationProgramState.load_from_json(dir_path,seed)
-    
-    if state is None:
-        state = AblationProgramState(
-            TABULAR_QLEARNING_PATH,
-            dir_path,
-            seed
-        )
-        state.env_setup()
-
-    
-
-SELECTABLE_EXPERIMENTS = [experiment_1] 
-
-if __name__ == "__main__":
-    experiment_1()
