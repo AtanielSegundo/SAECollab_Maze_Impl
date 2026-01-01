@@ -21,16 +21,27 @@ class AblationProgramState:
                  tabular_trainer_path:str          = None,           # PATH TO TABULAR QLEARNING EXECUTABLE
                  save_dir_path       :str          = "./Ablation",
                  initial_seed                      = 67,
-                 extended_info       : dict        = None
+                 extended_info       : dict        = None,
+                 comb_indexes        : list        = None
     ):
         self.tabular_trainer_path = tabular_trainer_path
         self.seed                 = initial_seed
         self.save_dir_path        = save_dir_path
         self.save_dir_path        = os.path.join(self.save_dir_path,str(self.seed))
         self.program_state_path   = os.path.join(self.save_dir_path,AblationProgramState.STATE_JSON_NAME)
+        #TODO: MAYBE AN BETTER APPROACH? 
+        self.comb_indexes_ptr     = -1                      
+        self.comb_indexes         = comb_indexes  or list() 
         self.extended             = extended_info or dict()
 
-    def env_setup(self):
+    def update_comb_indexes(self):
+        self.comb_indexes_ptr += 1
+        if len(self.comb_indexes) < self.comb_indexes_ptr + 1 :
+            self.comb_indexes.append(0)
+        else:
+            self.comb_indexes[self.comb_indexes_ptr] += 1
+
+    def env_update(self):
         os.makedirs(self.save_dir_path,exist_ok=True)
         self.save_json()
 
@@ -39,6 +50,7 @@ class AblationProgramState:
             "tabular_trainer_path": self.tabular_trainer_path,
             "save_dir_path"       : self.save_dir_path,
             "program_state_path"  : self.program_state_path,
+            "comb_indexes"        : self.comb_indexes,
             "seed"                : self.seed,
             "extended"            : self.extended
         }
@@ -47,11 +59,18 @@ class AblationProgramState:
 
     def add_save_path_head(self,p:str):
         self.save_dir_path = os.path.join(self.save_dir_path,p)
-        os.makedirs(self.save_dir_path,exist_ok=True)                
+        self.update_comb_indexes()
+        self.env_update()
 
     def remove_save_path_head(self):
         self.save_dir_path = os.path.dirname(self.save_dir_path)
+        self.comb_indexes_ptr -= 1 
  
+    def getLastCombIndex(self):
+        if len(self.comb_indexes) < self.comb_indexes_ptr+2:
+            return 0
+        return self.comb_indexes[self.comb_indexes_ptr+1]
+    
     def train_tabular_agent(self,maze_path:str,hp:GlobalHyperparameters):        
         tabular_save_path = os.path.join(self.save_dir_path,"tabular")
         os.makedirs(tabular_save_path,exist_ok=True)
@@ -72,17 +91,16 @@ class AblationProgramState:
         )
 
     @classmethod
-    def load_from_json(cls,dir_path,seed) -> Optional[Self]:
-        experiment_path = os.path.join(dir_path,str(seed))
+    def load_from_json(cls, dir_path, seed) -> Optional[Self]:
+        experiment_path = os.path.join(dir_path, str(seed))
         if not os.path.exists(experiment_path): 
             return None
         
-        state_path = os.path.join(experiment_path,AblationProgramState.STATE_JSON_NAME)
-
+        state_path = os.path.join(experiment_path, AblationProgramState.STATE_JSON_NAME)
         if not os.path.exists(state_path): 
             return None
         
-        with open(state_path,'r') as f:
+        with open(state_path, 'r') as f:
             data = json.load(f)
         
         if data == None: return None
@@ -93,5 +111,10 @@ class AblationProgramState:
         ablation_state.program_state_path   = data["program_state_path"]
         ablation_state.seed                 = data["seed"]
         ablation_state.extended             = data["extended"]
+        ablation_state.comb_indexes         = data["comb_indexes"]
+        
+        # FIX: Reset to base directory level for loop continuation
+        for _ in range(len(ablation_state.comb_indexes) + 1):
+            ablation_state.save_dir_path = os.path.dirname(ablation_state.save_dir_path)
 
         return ablation_state

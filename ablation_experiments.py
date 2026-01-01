@@ -1,3 +1,5 @@
+import time
+
 from os.path import basename
 from Ablation import AblationProgramState,GlobalHyperparameters
 from models.QModels import exp_decay_factor_to
@@ -19,14 +21,14 @@ def experiment_1(dir_path:str=None,seed=None):
             dir_path,
             seed
         )
-        state.env_setup()
+        state.env_update()
 
     # COMBINATORIAL OPTIONS START
     MAZES = ["./mazes/small_eg.maze","./mazes/medium_eg.maze","./mazes/big_eg.maze"]
         
     # COMBINATORIAL OPTIONS END
 
-    for maze_path in MAZES: 
+    for maze_path in MAZES[state.getLastCombIndex():]: 
         maze_tag = basename(maze_path).split(".")[0]
         state.add_save_path_head(maze_tag)   
         print(state.save_dir_path)
@@ -54,8 +56,11 @@ def experiment_1(dir_path:str=None,seed=None):
 
         # TRAIN TABULAR MODEL
         state.train_tabular_agent(maze_path,hyperparameters)
+        
+        time.sleep(4)
 
         state.remove_save_path_head()
+
         
     
 SELECTABLE_EXPERIMENTS = [experiment_1] 
