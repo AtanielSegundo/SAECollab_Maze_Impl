@@ -3,6 +3,11 @@ import json
 import subprocess
 from typing import *
 
+from env.MazeEnv     import *
+from env.MazeWrapper import StateEncoder, MazeGymWrapper
+from models.AStar    import AStarQModel
+from models.QTable   import genearate_qtable_from_model
+
 METRICS_FILE_NAME = "metrics.csv"
 QTABLE_FILE_NAME  = "tabular.qtable"
 
@@ -89,6 +94,16 @@ class AblationProgramState:
             check=False,
             stdout=subprocess.DEVNULL
         )
+    
+    def save_a_star_qtable(self,maze_path:str):
+        env = MazeGymWrapper(MazeEnv(maze_path))
+        a_star_model = AStarQModel(env)
+        qtable =  genearate_qtable_from_model(
+            env, a_star_model, env.action_size,
+            get_q_val_method='__call__',
+            use_extras=False
+        )
+        qtable.save(os.path.join(self.save_dir_path,"astar.qtable"))
 
     @classmethod
     def load_from_json(cls, dir_path, seed) -> Optional[Self]:

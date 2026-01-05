@@ -37,7 +37,7 @@ def experiment_1(dir_path:str=None,seed=None):
         
         # GLOBAL HYPERPARAMETERS
         EPISODES  = 200
-        MAX_STEPS =maze_env.opens_count * len(list(Action))
+        MAX_STEPS = maze_env.opens_count * len(list(Action))
         
         epsilon_decay = exp_decay_factor_to(
                 final_epsilon=0.1,
@@ -56,9 +56,8 @@ def experiment_1(dir_path:str=None,seed=None):
 
         # TRAIN TABULAR MODEL
         state.train_tabular_agent(maze_path,hyperparameters)
+        state.save_a_star_qtable(maze_path)
         
-        time.sleep(4)
-
         state.remove_save_path_head()
 
         
