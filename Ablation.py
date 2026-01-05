@@ -114,7 +114,7 @@ class AblationProgramState:
         ablation_state.comb_indexes         = data["comb_indexes"]
         
         # FIX: Reset to base directory level for loop continuation
-        for _ in range(len(ablation_state.comb_indexes) + 1):
+        for _ in range(len(ablation_state.comb_indexes)):
             ablation_state.save_dir_path = os.path.dirname(ablation_state.save_dir_path)
 
         return ablation_state
