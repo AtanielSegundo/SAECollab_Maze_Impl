@@ -8,9 +8,6 @@ from env.MazeWrapper import StateEncoder, MazeGymWrapper
 from models.AStar    import AStarQModel
 from models.QTable   import genearate_qtable_from_model
 
-METRICS_FILE_NAME = "metrics.csv"
-QTABLE_FILE_NAME  = "tabular.qtable"
-
 class GlobalHyperparameters:
     def __init__(self,learning_rate,discount_factor,epsilon_decay,episodes,max_steps):
         self.learning_rate = learning_rate
@@ -19,8 +16,73 @@ class GlobalHyperparameters:
         self.episodes        = episodes
         self.max_steps       = max_steps
 
+class LayerInsertionType(Enum):
+    CNT = "CNT" 
+    CRT = "CRT" 
+    DRT = "DRT" 
+    ALT = "ALT"
+    
+    @property
+    def tag(self):
+        return self.value
+
+class LayerMode:
+    def __init__(self,
+                 is_k_trainable:bool,
+                 use_extra_branch:bool
+                ):
+        self.is_k_trainable   = is_k_trainable
+        self.use_extra_branch = use_extra_branch
+
+class LayerModeType(Enum):
+    M1 = LayerMode(False,False)
+    M2 = LayerMode(False,True)
+    M3 = LayerMode(True ,False)
+    M4 = LayerMode(True ,True)
+
+    @property
+    def tag(self):
+        return str(self).split(".")[-1]
+
+class StateRepresentation:
+    NUM_LAST_STATES_TAG          = "nls"
+    NUM_LAST_ACTIONS_TAG         = "nla"
+    POSSIBLE_ACTIONS_FEATURE_TAG = "paf"
+    VISITED_COUNT_TAG            = "vcnt"
+
+    def __init__(self,
+        state_encoder           :StateEncoder  = StateEncoder.COORDS,
+        num_last_states         :int           = None,  
+        num_last_actions        :int           = None, 
+        possible_actions_feature:bool          = False, 
+        visited_count           :bool          = False,
+    ) :
+        self.opts = {
+            "state_encoder"           : state_encoder,
+            "num_last_states"         : num_last_states,
+            "num_last_actions"        : num_last_actions,
+            "possible_actions_feature": possible_actions_feature,
+            "visited_count"           : visited_count
+        }
+    
+    @property
+    def tag(self):
+        tag = ""
+        tag += str(self.opts["state_encoder"]).split(".")[-1]
+        if not self.opts["num_last_states"] is None:
+            tag += f"_{StateRepresentation.NUM_LAST_STATES_TAG}_" + str(self.opts["num_last_states"])
+        if not self.opts["num_last_actions"] is None:
+            tag += f"_{StateRepresentation.NUM_LAST_ACTIONS_TAG}_" + str(self.opts["num_last_actions"])
+        if self.opts["possible_actions_feature"]:
+            tag += f"_{StateRepresentation.POSSIBLE_ACTIONS_FEATURE_TAG}_"
+        if self.opts["visited_count"]:
+            tag += f"_{StateRepresentation.VISITED_COUNT_TAG}_"
+        return tag
+
 class AblationProgramState:
     STATE_JSON_NAME = ".ablation_state.json"
+    METRICS_FILE_NAME = "metrics.csv"
+    QTABLE_FILE_NAME  = "tabular.qtable"
 
     def __init__(self,
                  tabular_trainer_path:str          = None,           # PATH TO TABULAR QLEARNING EXECUTABLE
@@ -68,8 +130,10 @@ class AblationProgramState:
         self.env_update()
 
     def remove_save_path_head(self):
-        self.save_dir_path = os.path.dirname(self.save_dir_path)
-        self.comb_indexes_ptr -= 1 
+        self.save_dir_path     = os.path.dirname(self.save_dir_path)
+        self.comb_indexes      = self.comb_indexes[:-1]
+        self.comb_indexes_ptr -= 1
+
  
     def getLastCombIndex(self):
         if len(self.comb_indexes) < self.comb_indexes_ptr+2:
@@ -88,8 +152,8 @@ class AblationProgramState:
              "--episodes", str(hp.episodes),
              "--max_steps", str(hp.max_steps),
              "--seed", str(self.seed),
-             "--qtable_path", f"{os.path.join(tabular_save_path,QTABLE_FILE_NAME)}",
-             "--metrics_path", f"{os.path.join(tabular_save_path,METRICS_FILE_NAME)}",
+             "--qtable_path", f"{os.path.join(tabular_save_path,AblationProgramState.QTABLE_FILE_NAME)}",
+             "--metrics_path", f"{os.path.join(tabular_save_path,AblationProgramState.METRICS_FILE_NAME)}",
             ],
             check=False,
             stdout=subprocess.DEVNULL
