@@ -1,9 +1,12 @@
+#!python3 Ablation.py 
+
 import os
 import json
 import subprocess
 from typing import *
 
 from env.MazeEnv     import *
+from StackedCollab.collabNet import LayersConfig,MutationMode
 from env.MazeWrapper import StateEncoder, MazeGymWrapper
 from models.AStar    import AStarQModel
 from models.QTable   import genearate_qtable_from_model
@@ -35,14 +38,40 @@ class LayerMode:
         self.use_extra_branch = use_extra_branch
 
 class LayerModeType(Enum):
-    M1 = LayerMode(False,False)
-    M2 = LayerMode(False,True)
-    M3 = LayerMode(True ,False)
-    M4 = LayerMode(True ,True)
+    M1 = LayerMode(False, False)
+    M2 = LayerMode(False, True)
+    M3 = LayerMode(True , False)
+    M4 = LayerMode(True , True)
 
     @property
     def tag(self):
         return str(self).split(".")[-1]
+
+class ModelArch:
+    def __init__(self,
+                 max_layers: int,
+                 width_divs: LayersConfig,   # THE OUT LAYER DIV SHOULD BE 1
+                 activation: LayersConfig,
+                 use_bias  : LayersConfig
+                 )         : 
+        self.max_layers  = max_layers
+        self.width_divs  = width_divs 
+        self.activation  = activation
+        self.use_bias    = use_bias
+    
+    @property
+    def tag(self):
+        def GAN(act) -> str:
+            #GET ACTIVATION NAME EASY TO USE FN
+            return str(act).split("(")[0]
+        def GUB(b:bool) -> str:
+            return "T" if b else "F"
+
+        return f"{self.max_layers}" \
+               f"_H{self.width_divs.hidden}O{self.width_divs.out}E{self.width_divs.extra}" \
+               f"_H{GAN(self.activation.hidden)}O{GAN(self.activation.out)}E{GAN(self.activation.extra)}" \
+               f"_H{GUB(self.use_bias.hidden)}O{GUB(self.use_bias.out)}E{GUB(self.use_bias.extra)}"
+
 
 class StateRepresentation:
     NUM_LAST_STATES_TAG          = "nls"
@@ -85,28 +114,40 @@ class AblationProgramState:
     QTABLE_FILE_NAME  = "tabular.qtable"
 
     def __init__(self,
-                 tabular_trainer_path:str          = None,           # PATH TO TABULAR QLEARNING EXECUTABLE
+                 tabular_trainer_path:str          = None,
                  save_dir_path       :str          = "./Ablation",
                  initial_seed                      = 67,
                  extended_info       : dict        = None,
-                 comb_indexes        : list        = None
+                 completed_iteration : int         = -1
     ):
         self.tabular_trainer_path = tabular_trainer_path
         self.seed                 = initial_seed
         self.save_dir_path        = save_dir_path
         self.save_dir_path        = os.path.join(self.save_dir_path,str(self.seed))
         self.program_state_path   = os.path.join(self.save_dir_path,AblationProgramState.STATE_JSON_NAME)
-        #TODO: MAYBE AN BETTER APPROACH? 
-        self.comb_indexes_ptr     = -1                      
-        self.comb_indexes         = comb_indexes  or list() 
         self.extended             = extended_info or dict()
+        self.completed_iteration  = completed_iteration
 
-    def update_comb_indexes(self):
-        self.comb_indexes_ptr += 1
-        if len(self.comb_indexes) < self.comb_indexes_ptr + 1 :
-            self.comb_indexes.append(0)
-        else:
-            self.comb_indexes[self.comb_indexes_ptr] += 1
+    def iteration_to_indices(self, iteration: int, dimensions: list) -> list:
+        """Convert linear iteration number to multi-dimensional indices"""
+        indices = []
+        remaining = iteration
+        
+        # Work from innermost to outermost dimension
+        for i in range(len(dimensions) - 1, -1, -1):
+            indices.insert(0, remaining % dimensions[i])
+            remaining //= dimensions[i]
+        
+        return indices
+
+    def get_skip_indices(self, dimensions: list) -> list:
+        """Get the starting indices for each dimension based on completed_iteration"""
+        if self.completed_iteration < 0:
+            return [0] * len(dimensions)
+        
+        # Get indices of next iteration to run
+        next_iteration = self.completed_iteration + 1
+        return self.iteration_to_indices(next_iteration, dimensions)
 
     def env_update(self):
         os.makedirs(self.save_dir_path,exist_ok=True)
@@ -117,28 +158,28 @@ class AblationProgramState:
             "tabular_trainer_path": self.tabular_trainer_path,
             "save_dir_path"       : self.save_dir_path,
             "program_state_path"  : self.program_state_path,
-            "comb_indexes"        : self.comb_indexes,
             "seed"                : self.seed,
-            "extended"            : self.extended
+            "extended"            : self.extended,
+            "completed_iteration" : self.completed_iteration
         }
         with open(self.program_state_path, 'w') as f:
             json.dump(data,f, indent = 4, ensure_ascii = False)
 
     def add_save_path_head(self,p:str):
         self.save_dir_path = os.path.join(self.save_dir_path,p)
-        self.update_comb_indexes()
-        self.env_update()
+        os.makedirs(self.save_dir_path,exist_ok=True)
 
     def remove_save_path_head(self):
-        self.save_dir_path     = os.path.dirname(self.save_dir_path)
-        self.comb_indexes      = self.comb_indexes[:-1]
-        self.comb_indexes_ptr -= 1
+        self.save_dir_path = os.path.dirname(self.save_dir_path)
 
- 
-    def getLastCombIndex(self):
-        if len(self.comb_indexes) < self.comb_indexes_ptr+2:
-            return 0
-        return self.comb_indexes[self.comb_indexes_ptr+1]
+    def mark_iteration_complete(self, iteration_num: int):
+        """Mark an iteration as complete and save state"""
+        self.completed_iteration = iteration_num
+        self.save_json()
+    
+    def should_skip_iteration(self, iteration_num: int) -> bool:
+        """Check if this iteration was already completed"""
+        return iteration_num <= self.completed_iteration
     
     def train_tabular_agent(self,maze_path:str,hp:GlobalHyperparameters):        
         tabular_save_path = os.path.join(self.save_dir_path,"tabular")
@@ -158,6 +199,27 @@ class AblationProgramState:
             check=False,
             stdout=subprocess.DEVNULL
         )
+
+    def get_current_iteration(self, indices: list, dimensions: list) -> int:
+        """
+        Convert multi-dimensional indices to linear iteration number.
+        
+        Args:
+            indices: Current position in each dimension
+            dimensions: Size of each dimension
+        
+        Returns:
+            Linear iteration number (0-based)
+        """
+        current_iter = 0
+        multiplier = 1
+        
+        # Start from innermost dimension (last) to outermost (first)
+        for i in range(len(dimensions) - 1, -1, -1):
+            current_iter += indices[i] * multiplier
+            multiplier *= dimensions[i]
+        
+        return current_iter
     
     def save_a_star_qtable(self,maze_path:str):
         env = MazeGymWrapper(MazeEnv(maze_path))
@@ -186,14 +248,12 @@ class AblationProgramState:
 
         ablation_state = AblationProgramState()
         ablation_state.tabular_trainer_path = data["tabular_trainer_path"]
-        ablation_state.save_dir_path        = data["save_dir_path"]
         ablation_state.program_state_path   = data["program_state_path"]
         ablation_state.seed                 = data["seed"]
         ablation_state.extended             = data["extended"]
-        ablation_state.comb_indexes         = data["comb_indexes"]
+        ablation_state.completed_iteration  = data.get("completed_iteration", -1)
         
-        # FIX: Reset to base directory level for loop continuation
-        for _ in range(len(ablation_state.comb_indexes)):
-            ablation_state.save_dir_path = os.path.dirname(ablation_state.save_dir_path)
+        # Set save_dir_path to base experiment directory
+        ablation_state.save_dir_path = experiment_path
 
         return ablation_state
