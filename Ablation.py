@@ -5,6 +5,10 @@ import json
 import subprocess
 from typing import *
 
+import torch
+import numpy as np
+import random
+
 from env.MazeEnv     import *
 from StackedCollab.collabNet import LayersConfig,MutationMode
 from env.MazeWrapper import StateEncoder, MazeGymWrapper
@@ -49,26 +53,28 @@ class LayerModeType(Enum):
 
 class ModelArch:
     def __init__(self,
-                 max_layers: int,
-                 width_divs: LayersConfig,   # THE OUT LAYER DIV SHOULD BE 1
-                 activation: LayersConfig,
-                 use_bias  : LayersConfig
+                 max_layers             : int,
+                 width_multipliers      : LayersConfig,   # THE OUT LAYER MULTIPLIER SHOULD BE 1
+                 delta_width_multipliers: LayersConfig,
+                 activation             : LayersConfig,
+                 use_bias               : LayersConfig
                  )         : 
-        self.max_layers  = max_layers
-        self.width_divs  = width_divs 
-        self.activation  = activation
-        self.use_bias    = use_bias
+        self.max_layers              = max_layers
+        self.width_multipliers       = width_multipliers
+        self.delta_width_multipliers = delta_width_multipliers
+        self.activation              = activation
+        self.use_bias                = use_bias
     
     @property
     def tag(self):
         def GAN(act) -> str:
-            #GET ACTIVATION NAME EASY TO USE FN
+            #GET ACTIVATION NAME
             return str(act).split("(")[0]
         def GUB(b:bool) -> str:
             return "T" if b else "F"
 
         return f"{self.max_layers}" \
-               f"_H{self.width_divs.hidden}O{self.width_divs.out}E{self.width_divs.extra}" \
+               f"_H{self.width_multipliers.hidden}O{self.width_multipliers.out}E{self.width_multipliers.extra}" \
                f"_H{GAN(self.activation.hidden)}O{GAN(self.activation.out)}E{GAN(self.activation.extra)}" \
                f"_H{GUB(self.use_bias.hidden)}O{GUB(self.use_bias.out)}E{GUB(self.use_bias.extra)}"
 
@@ -103,9 +109,9 @@ class StateRepresentation:
         if not self.opts["num_last_actions"] is None:
             tag += f"_{StateRepresentation.NUM_LAST_ACTIONS_TAG}_" + str(self.opts["num_last_actions"])
         if self.opts["possible_actions_feature"]:
-            tag += f"_{StateRepresentation.POSSIBLE_ACTIONS_FEATURE_TAG}_"
+            tag += f"_{StateRepresentation.POSSIBLE_ACTIONS_FEATURE_TAG}"
         if self.opts["visited_count"]:
-            tag += f"_{StateRepresentation.VISITED_COUNT_TAG}_"
+            tag += f"_{StateRepresentation.VISITED_COUNT_TAG}"
         return tag
 
 class AblationProgramState:
@@ -269,3 +275,14 @@ class AblationProgramState:
         ablation_state.save_dir_path = experiment_path
 
         return ablation_state
+    
+
+def set_seed(seed):
+    """Set seeds for reproducibility across numpy, random, torch."""
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.manual_seed(seed)
+    try:
+        torch.cuda.manual_seed_all(seed)
+    except Exception:
+        pass
