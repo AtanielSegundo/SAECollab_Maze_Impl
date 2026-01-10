@@ -122,6 +122,8 @@ class AblationProgramState:
     ):
         self.tabular_trainer_path = tabular_trainer_path
         self.seed                 = initial_seed
+        self.comb_ptr             = -1
+        self.comb_tags            = []
         self.save_dir_path        = save_dir_path
         self.save_dir_path        = os.path.join(self.save_dir_path,str(self.seed))
         self.program_state_path   = os.path.join(self.save_dir_path,AblationProgramState.STATE_JSON_NAME)
@@ -159,17 +161,27 @@ class AblationProgramState:
             "save_dir_path"       : self.save_dir_path,
             "program_state_path"  : self.program_state_path,
             "seed"                : self.seed,
+            "comb_tags"           : list(map(list,self.comb_tags)),
             "extended"            : self.extended,
             "completed_iteration" : self.completed_iteration
         }
         with open(self.program_state_path, 'w') as f:
             json.dump(data,f, indent = 4, ensure_ascii = False)
 
+    def update_comb_tags(self,tag:str):
+        if len(self.comb_tags) < self.comb_ptr + 1:
+            self.comb_tags.append(set())
+
+        self.comb_tags[self.comb_ptr].add(tag)
+
     def add_save_path_head(self,p:str):
+        self.comb_ptr += 1
+        self.update_comb_tags(p)
         self.save_dir_path = os.path.join(self.save_dir_path,p)
         os.makedirs(self.save_dir_path,exist_ok=True)
 
     def remove_save_path_head(self):
+        self.comb_ptr -= 1
         self.save_dir_path = os.path.dirname(self.save_dir_path)
 
     def mark_iteration_complete(self, iteration_num: int):
