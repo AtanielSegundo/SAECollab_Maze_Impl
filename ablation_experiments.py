@@ -11,7 +11,7 @@ from env.MazeWrapper import StateEncoder, MazeGymWrapper
 
 from functools import reduce
 import torch.nn as nn
-
+import numpy as np
 
 def log_experiment_time(start_time, current_iter, total_experiment_iters, save_path, first_current_iter):
     """
@@ -103,6 +103,114 @@ def log_experiment_time(start_time, current_iter, total_experiment_iters, save_p
     
     sys.stdout.flush()
 
+def train_saecollab_model():
+    pass
+
+def train_baseline_dense_model():
+    pass
+
+def gen_concrete_arch(
+    base_width    : int,
+    env           : MazeGymWrapper,
+    architecute   : ModelArch,
+    insertion_type: LayerInsertionType
+) -> Optional[List[LayersConfig]]:
+    
+    if insertion_type is LayerInsertionType.CNT:
+        cnt_hidden = architecute.width_multipliers.hidden * base_width
+        cnt_extra  = architecute.width_multipliers.extra  * base_width
+        cnt_hidden = np.ceil(cnt_hidden)
+        cnt_extra  = np.ceil(cnt_extra)
+        concrete_arch = [
+            LayersConfig(
+                cnt_hidden,
+                env.action_size,
+                cnt_extra
+            ) 
+            for _ in architecute.max_layers
+        ]
+        return concrete_arch
+    
+    elif insertion_type is LayerInsertionType.CRT:
+        concrete_arch = list()
+        crt_hidden   = architecute.width_multipliers.hidden * base_width
+        crt_extra    = architecute.width_multipliers.extra  * base_width
+        delta_hidden = architecute.delta_width_multipliers.hidden * crt_hidden
+        delta_extra  = architecute.delta_width_multipliers.extra * crt_extra 
+        for i in architecute.max_layers:
+            hidden_size = np.ceil(crt_hidden + i * delta_hidden)
+            extra_size  = np.ceil(crt_extra + i * delta_extra)
+            concrete_arch.append(
+                LayersConfig(hidden_size,
+                             env.action_size,
+                             extra_size)
+            )
+        return concrete_arch
+
+    elif insertion_type is LayerInsertionType.DRT:
+        concrete_arch = list()
+        drt_hidden   = architecute.width_multipliers.hidden * base_width
+        drt_extra    = architecute.width_multipliers.extra  * base_width
+        delta_hidden = architecute.delta_width_multipliers.hidden * drt_hidden
+        delta_extra  = architecute.delta_width_multipliers.extra * drt_extra 
+        for i in architecute.max_layers:
+            hidden_size = np.ceil(drt_hidden - i * delta_hidden)
+            extra_size  = np.ceil(drt_extra - i * delta_extra)
+            concrete_arch.append(
+                LayersConfig(hidden_size,
+                             env.action_size,
+                             extra_size)
+            )
+        return concrete_arch
+    
+    elif insertion_type is LayerInsertionType.ALT:
+        concrete_arch = list()
+        drt_hidden   = architecute.width_multipliers.hidden * base_width
+        drt_extra    = architecute.width_multipliers.extra  * base_width
+        delta_hidden = architecute.delta_width_multipliers.hidden * drt_hidden
+        delta_extra  = architecute.delta_width_multipliers.extra * drt_extra 
+        sigma = 0.0
+        for i in architecute.max_layers:
+            if i > 0 : sigma = (2.0*np.random.random() - 1.0)
+            drt_hidden += np.ceil(sigma * delta_hidden)
+            drt_extra  += np.ceil(sigma * delta_extra)
+            concrete_arch.append(
+                LayersConfig(hidden_size,
+                             env.action_size,
+                             extra_size)
+            )
+        return concrete_arch
+    
+    else:
+        print(f"[ERROR] Insertion Type Invalid: {insertion_type}")
+        return None
+
+def train_models(
+    state: AblationProgramState,
+    maze: MazeEnv,
+    hp: GlobalHyperparameters,
+    state_repr: StateRepresentation,
+    architecute: ModelArch,
+    insertion_type: LayerInsertionType,
+    mode_type: LayerModeType,
+    mutation_mode: MutationMode  
+):
+    gym_env_maze = MazeGymWrapper(
+        maze,
+        **state_repr.opts
+    )
+    tabular_like_width = gym_env_maze.action_size * gym_env_maze.rows \
+                         * gym_env_maze.cols 
+    
+    concrete_arch = gen_concrete_arch(tabular_like_width,
+                                      gym_env_maze,
+                                      architecute,
+                                      insertion_type)
+
+    train_saecollab_model()
+    train_baseline_dense_model()
+    pass
+
 def experiment_1(dir_path:str=None,seed=None):
     dir_path = dir_path or 'experiment_1'
     seed     = seed or 333
@@ -144,30 +252,33 @@ def experiment_1(dir_path:str=None,seed=None):
         ),
     ]
 
+    N_MAX_LAYERS = 4 
+    # GARANTINDO QUE ATE O ULTIMO LAYER TENHAM VARIAÇÕES VALIDAS
+    width_delta  = 1 / (N_MAX_LAYERS+1)
     ARCHITECTURES = [
-        ModelArch(4,
+        ModelArch(N_MAX_LAYERS,
                   LayersConfig(1/4,1,1/4),
-                  LayersConfig(1/2,1,1/2),
+                  LayersConfig(width_delta,1,width_delta),
                   LayersConfig(nn.ReLU(),nn.Identity(),nn.ReLU()),
                   LayersConfig(True,True,True)
                   ),
-        ModelArch(4,
+        ModelArch(N_MAX_LAYERS,
                   LayersConfig(1/4,1,1/8),
-                  LayersConfig(1/2,1,1/2),
+                  LayersConfig(width_delta,1,width_delta),
                   LayersConfig(nn.ReLU(),nn.Identity(),nn.Identity()),
                   LayersConfig(True,True,True)
                   ),
 
-        ModelArch(4,
+        ModelArch(N_MAX_LAYERS,
                   LayersConfig(1/4,1,1/8),
-                  LayersConfig(1/2,1,1/2),
+                  LayersConfig(width_delta,1,width_delta),
                   LayersConfig(nn.ReLU(),nn.Identity(),nn.Identity()),
                   LayersConfig(False,True,False)
                   ),
 
-        ModelArch(4,
+        ModelArch(N_MAX_LAYERS,
                   LayersConfig(1/4,1,1/4),
-                  LayersConfig(1/2,1,1/2),
+                  LayersConfig(width_delta,1,width_delta),
                   LayersConfig(nn.ReLU(),nn.Identity(),nn.ReLU()),
                   LayersConfig(False,True,False)
                   ),
@@ -270,6 +381,15 @@ def experiment_1(dir_path:str=None,seed=None):
                             
                             # MODELS TRAINING START HERE
 
+                            train_models(state,
+                                         maze_env,
+                                         hyperparameters,
+                                         state_representation,
+                                         arch,
+                                         insertion_type,
+                                         layer_mode,
+                                         mutation_mode
+                                         )
 
                             # MODELS TRAINING ENDS HERE
                             
@@ -289,4 +409,4 @@ def experiment_1(dir_path:str=None,seed=None):
 
         
 
-SELECTABLE_EXPERIMENTS = [experiment_1]
+SELECTABLE_EXPERIMENTS = [experiment_1] 
