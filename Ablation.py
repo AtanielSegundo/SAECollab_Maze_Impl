@@ -3,6 +3,7 @@
 import os
 import json
 import subprocess
+import multiprocessing
 from typing import *
 
 import torch
@@ -16,12 +17,22 @@ from models.AStar    import AStarQModel
 from models.QTable   import genearate_qtable_from_model
 
 class GlobalHyperparameters:
-    def __init__(self,learning_rate,discount_factor,epsilon_decay,episodes,max_steps):
+    def __init__(self,
+                 learning_rate,
+                 discount_factor,
+                 epsilon_decay,
+                 episodes,
+                 max_steps,
+                 batch_size,
+                 steps_learn_interval
+                 ):
         self.learning_rate = learning_rate
         self.discount_factor = discount_factor
         self.epsilon_decay   = epsilon_decay
         self.episodes        = episodes
         self.max_steps       = max_steps
+        self.batch_size      = batch_size
+        self.steps_learn_interval = steps_learn_interval
 
 class LayerInsertionType(Enum):
     CNT = "CNT" 
@@ -69,7 +80,7 @@ class ModelArch:
     def tag(self):
         def GAN(act) -> str:
             #GET ACTIVATION NAME
-            return str(act).split("(")[0]
+            return str(act).split(".")[-1].split("'")[0]
         def GUB(b:bool) -> str:
             return "T" if b else "F"
 
@@ -114,8 +125,32 @@ class StateRepresentation:
             tag += f"_{StateRepresentation.VISITED_COUNT_TAG}"
         return tag
 
+class ModelTrainMetrics:
+    def __init__(self,
+                 episode         :List[int]   = None,
+                 reward          :List[float] = None,
+                 cumulative_goals:List[int]   = None,
+                 sucess_rate     :List[float] = None,
+                 loss            :List[float] = None,
+                 steps           :List[int]   = None
+                 ):
+        self.episode          :List[int]   = episode          or list()
+        self.reward           :List[float] = reward           or list()
+        self.cumulative_goals :List[int]   = cumulative_goals or list()
+        self.sucess_rate      :List[float] = sucess_rate      or list()
+        self.loss             :List[float] = loss             or list()
+        self.steps            :List[int]   = steps            or list()
+    
+    def append(self,episode,reward,cumulative_goals,sucess_rate,loss,steps):
+        self.episode          = episode
+        self.reward           = reward
+        self.cumulative_goals = cumulative_goals
+        self.sucess_rate      = sucess_rate
+        self.loss             = loss
+        self.steps            = steps
+
 class AblationProgramState:
-    STATE_JSON_NAME = ".ablation_state.json"
+    STATE_JSON_NAME   = ".ablation_state.json"
     METRICS_FILE_NAME = "metrics.csv"
     QTABLE_FILE_NAME  = "tabular.qtable"
 
@@ -199,24 +234,62 @@ class AblationProgramState:
         """Check if this iteration was already completed"""
         return iteration_num <= self.completed_iteration
     
-    def train_tabular_agent(self,maze_path:str,hp:GlobalHyperparameters):        
-        tabular_save_path = os.path.join(self.save_dir_path,"tabular")
-        os.makedirs(tabular_save_path,exist_ok=True)
-        subprocess.run(
-            [self.tabular_trainer_path, 
-             maze_path,
-             "--lr", str(hp.learning_rate),
-             "--df", str(hp.discount_factor),
-             "--decay", f"{hp.epsilon_decay}",
-             "--episodes", str(hp.episodes),
-             "--max_steps", str(hp.max_steps),
-             "--seed", str(self.seed),
-             "--qtable_path", f"{os.path.join(tabular_save_path,AblationProgramState.QTABLE_FILE_NAME)}",
-             "--metrics_path", f"{os.path.join(tabular_save_path,AblationProgramState.METRICS_FILE_NAME)}",
-            ],
-            check=False,
-            stdout=subprocess.DEVNULL
-        )
+    def train_tabular_agent(self,maze_path:str,hp:GlobalHyperparameters,
+                            repetitions:int=1):        
+        if repetitions == 1:
+            tabular_save_path = os.path.join(self.save_dir_path,"tabular")
+            os.makedirs(tabular_save_path,exist_ok=True)
+            subprocess.run(
+                [self.tabular_trainer_path, 
+                maze_path,
+                "--lr", str(hp.learning_rate),
+                "--df", str(hp.discount_factor),
+                "--decay", f"{hp.epsilon_decay}",
+                "--episodes", str(hp.episodes),
+                "--max_steps", str(hp.max_steps),
+                "--seed", str(self.seed),
+                "--qtable_path", f"{os.path.join(tabular_save_path,AblationProgramState.QTABLE_FILE_NAME)}",
+                "--metrics_path", f"{os.path.join(tabular_save_path,AblationProgramState.METRICS_FILE_NAME)}",
+                ],
+                check=False,
+                stdout=subprocess.DEVNULL
+            )
+        elif repetitions > 1 :
+            tabular_processes = []
+            for repetition in range(repetitions):
+                tabular_save_path = os.path.join(self.save_dir_path,f"tabular_{repetition}")
+                os.makedirs(tabular_save_path,exist_ok=True)
+                seed = self.seed + repetition
+                qtable_path  = os.path.join(tabular_save_path,AblationProgramState.QTABLE_FILE_NAME)
+                metrics_path = os.path.join(tabular_save_path,AblationProgramState.METRICS_FILE_NAME)
+                p = multiprocessing.Process(
+                    target=subprocess.run,
+                    args=(
+                        [
+                        self.tabular_trainer_path, 
+                        maze_path,
+                        "--lr", str(hp.learning_rate),
+                        "--df", str(hp.discount_factor),
+                        "--decay", f"{hp.epsilon_decay}",
+                        "--episodes", str(hp.episodes),
+                        "--max_steps", str(hp.max_steps),
+                        "--seed", str(seed),
+                        "--qtable_path", f"{qtable_path}",
+                        "--metrics_path", f"{metrics_path}",
+                        ],
+                    ),
+                    kwargs={"check":False,"stdout":subprocess.DEVNULL}
+                )
+                p.start()
+                tabular_processes.append(p)
+
+            for idx,process in enumerate(tabular_processes):
+                process.join()
+                print(f"[INFO] Tabular Process {idx+1} Ended")
+
+        else:
+            print(f"[ERROR] Invalid Number of Repetitions {repetitions} For Tabular Agent")
+            exit(-1)
 
     def get_current_iteration(self, indices: list, dimensions: list) -> int:
         """

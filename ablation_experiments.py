@@ -1,10 +1,11 @@
 #!python3 ablation_experiments.py
 
 import time
+import csv
 
 from os.path import basename
 from Ablation import *
-from models.QModels import exp_decay_factor_to
+from models.QModels import exp_decay_factor_to,TorchDDQN
 
 from env.MazeEnv import *
 from env.MazeWrapper import StateEncoder, MazeGymWrapper
@@ -103,12 +104,6 @@ def log_experiment_time(start_time, current_iter, total_experiment_iters, save_p
     
     sys.stdout.flush()
 
-def train_saecollab_model():
-    pass
-
-def train_baseline_dense_model():
-    pass
-
 def gen_concrete_arch(
     base_width    : int,
     env           : MazeGymWrapper,
@@ -127,7 +122,7 @@ def gen_concrete_arch(
                 env.action_size,
                 cnt_extra
             ) 
-            for _ in architecute.max_layers
+            for _ in range(architecute.max_layers)
         ]
         return concrete_arch
     
@@ -137,7 +132,7 @@ def gen_concrete_arch(
         crt_extra    = architecute.width_multipliers.extra  * base_width
         delta_hidden = architecute.delta_width_multipliers.hidden * crt_hidden
         delta_extra  = architecute.delta_width_multipliers.extra * crt_extra 
-        for i in architecute.max_layers:
+        for i in range(architecute.max_layers):
             hidden_size = np.ceil(crt_hidden + i * delta_hidden)
             extra_size  = np.ceil(crt_extra + i * delta_extra)
             concrete_arch.append(
@@ -153,7 +148,7 @@ def gen_concrete_arch(
         drt_extra    = architecute.width_multipliers.extra  * base_width
         delta_hidden = architecute.delta_width_multipliers.hidden * drt_hidden
         delta_extra  = architecute.delta_width_multipliers.extra * drt_extra 
-        for i in architecute.max_layers:
+        for i in range(architecute.max_layers):
             hidden_size = np.ceil(drt_hidden - i * delta_hidden)
             extra_size  = np.ceil(drt_extra - i * delta_extra)
             concrete_arch.append(
@@ -170,20 +165,78 @@ def gen_concrete_arch(
         delta_hidden = architecute.delta_width_multipliers.hidden * drt_hidden
         delta_extra  = architecute.delta_width_multipliers.extra * drt_extra 
         sigma = 0.0
-        for i in architecute.max_layers:
+        for i in range(architecute.max_layers):
             if i > 0 : sigma = (2.0*np.random.random() - 1.0)
             drt_hidden += np.ceil(sigma * delta_hidden)
             drt_extra  += np.ceil(sigma * delta_extra)
             concrete_arch.append(
-                LayersConfig(hidden_size,
+                LayersConfig(drt_hidden,
                              env.action_size,
-                             extra_size)
+                             drt_extra)
             )
         return concrete_arch
     
     else:
         print(f"[ERROR] Insertion Type Invalid: {insertion_type}")
         return None
+
+def save_concrete_arch_info(save_dir:str,concrete_arch:List[LayersConfig]):
+    concrete_arch_repr = {"arch": [
+        {
+            "hidden":layer.hidden,
+            "out":layer.out,
+            "extra":layer.extra
+        } for layer in concrete_arch
+    ]}
+    with open(os.path.join(save_dir,"concrete_arch.json"),"w") as f:
+        json.dump(concrete_arch_repr,f,indent=4)
+
+def train_saecollab_model():
+    pass
+
+def train_baseline_dense_model(
+    save_path:str,
+    env: MazeGymWrapper,
+    model_arch:ModelArch,
+    concrete_layer_arch: List[LayersConfig],
+    hp:GlobalHyperparameters,
+    mode_type:LayerModeType,
+    mutation_mode:MutationMode,
+    repetitions:int
+):
+    layers = []
+    last_width = None
+    for i in range(model_arch.max_layers):
+        if i == 0 :
+            width = int(concrete_layer_arch[i].hidden)
+            layers.append(nn.Linear(env.state_size,width,bias=model_arch.use_bias.hidden))
+            layers.append(model_arch.activation.hidden())
+            last_width = width
+        elif i == model_arch.max_layers - 1:
+            layers.append(nn.Linear(last_width,env.action_size,bias=model_arch.use_bias.out))
+            layers.append(model_arch.activation.out())
+        else:
+            width = int(concrete_layer_arch[i].hidden + concrete_layer_arch[i].extra)
+            layers.append(nn.Linear(last_width,width,bias=model_arch.use_bias.hidden))
+            layers.append(model_arch.activation.hidden())
+            last_width = width
+
+    policy_net = nn.Sequential(*layers)
+    agent = TorchDDQN(
+        sequential_list=policy_net,
+        state_size=env.state_size,
+        action_size=env.action_size,
+        lr=hp.learning_rate,
+        gamma=hp.discount_factor,
+        batch_size=hp.batch_size,
+        epsilon_start=1.0,
+        epsilon_final=0.1,
+        epsilon_decay=hp.epsilon_decay,
+        learn_interval=hp.steps_learn_interval,
+    )
+
+
+
 
 def train_models(
     state: AblationProgramState,
@@ -193,7 +246,8 @@ def train_models(
     architecute: ModelArch,
     insertion_type: LayerInsertionType,
     mode_type: LayerModeType,
-    mutation_mode: MutationMode  
+    mutation_mode: MutationMode,
+    repetitions: int
 ):
     gym_env_maze = MazeGymWrapper(
         maze,
@@ -201,15 +255,27 @@ def train_models(
     )
     tabular_like_width = gym_env_maze.action_size * gym_env_maze.rows \
                          * gym_env_maze.cols 
-    
     concrete_arch = gen_concrete_arch(tabular_like_width,
                                       gym_env_maze,
                                       architecute,
                                       insertion_type)
-
+    save_concrete_arch_info(state.save_dir_path,concrete_arch)
+    
+    dense_model_dir = os.path.join(state.save_dir_path,"dense_model/")
+    os.makedirs(dense_model_dir,exist_ok=True)
+    dense_model_path = os.path.join(dense_model_dir,"metrics.csv")
+    
+    train_baseline_dense_model(dense_model_path,
+                               gym_env_maze,
+                               architecute,
+                               concrete_arch,
+                               hp,
+                               mode_type,
+                               mutation_mode,
+                               repetitions
+                               )
+    
     train_saecollab_model()
-    train_baseline_dense_model()
-    pass
 
 def experiment_1(dir_path:str=None,seed=None):
     dir_path = dir_path or 'experiment_1'
@@ -254,32 +320,32 @@ def experiment_1(dir_path:str=None,seed=None):
 
     N_MAX_LAYERS = 4 
     # GARANTINDO QUE ATE O ULTIMO LAYER TENHAM VARIAÇÕES VALIDAS
-    width_delta  = 1 / (N_MAX_LAYERS+1)
+    width_delta  = 1 / (N_MAX_LAYERS)
     ARCHITECTURES = [
         ModelArch(N_MAX_LAYERS,
                   LayersConfig(1/4,1,1/4),
                   LayersConfig(width_delta,1,width_delta),
-                  LayersConfig(nn.ReLU(),nn.Identity(),nn.ReLU()),
+                  LayersConfig(nn.ReLU,nn.Identity,nn.ReLU),
                   LayersConfig(True,True,True)
                   ),
         ModelArch(N_MAX_LAYERS,
                   LayersConfig(1/4,1,1/8),
                   LayersConfig(width_delta,1,width_delta),
-                  LayersConfig(nn.ReLU(),nn.Identity(),nn.Identity()),
+                  LayersConfig(nn.ReLU,nn.Identity,nn.Identity),
                   LayersConfig(True,True,True)
                   ),
 
         ModelArch(N_MAX_LAYERS,
                   LayersConfig(1/4,1,1/8),
                   LayersConfig(width_delta,1,width_delta),
-                  LayersConfig(nn.ReLU(),nn.Identity(),nn.Identity()),
+                  LayersConfig(nn.ReLU,nn.Identity,nn.Identity),
                   LayersConfig(False,True,False)
                   ),
 
         ModelArch(N_MAX_LAYERS,
                   LayersConfig(1/4,1,1/4),
                   LayersConfig(width_delta,1,width_delta),
-                  LayersConfig(nn.ReLU(),nn.Identity(),nn.ReLU()),
+                  LayersConfig(nn.ReLU,nn.Identity,nn.ReLU),
                   LayersConfig(False,True,False)
                   ),
     ]
@@ -288,7 +354,9 @@ def experiment_1(dir_path:str=None,seed=None):
     LAYER_MODES     = list(LayerModeType)
     MUTATION_MODES  = list(MutationMode)
 
-    
+    # VALIDA PARA O MODO TABULAR TAMBEM
+    REPETITIONS = 1
+
     COMB_ARRAYS_LIST = [MAZES, STATE_REPRESENTATIONS, ARCHITECTURES, INSERTION_TYPES, LAYER_MODES, MUTATION_MODES]
     DIMENSIONS = [len(arr) for arr in COMB_ARRAYS_LIST]
     TOTAL_EXPERIMENT_ITERS = reduce(lambda x,y : x * y, DIMENSIONS)
@@ -324,11 +392,13 @@ def experiment_1(dir_path:str=None,seed=None):
             discount_factor = 0.999,
             epsilon_decay   = epsilon_decay,
             episodes        = EPISODES,
-            max_steps       = MAX_STEPS
+            max_steps       = MAX_STEPS,
+            batch_size      = 1024,
+            steps_learn_interval = 4
         )
 
         # TRAIN TABULAR MODEL
-        state.train_tabular_agent(maze_path,hyperparameters)
+        state.train_tabular_agent(maze_path,hyperparameters,REPETITIONS)
         state.save_a_star_qtable(maze_path)
         
         first_current_iter = state.completed_iteration
@@ -378,7 +448,6 @@ def experiment_1(dir_path:str=None,seed=None):
                             
                             log_experiment_time(start_time,current_iter,TOTAL_EXPERIMENT_ITERS,state.save_dir_path,first_current_iter)
 
-                            
                             # MODELS TRAINING START HERE
 
                             train_models(state,
@@ -388,7 +457,8 @@ def experiment_1(dir_path:str=None,seed=None):
                                          arch,
                                          insertion_type,
                                          layer_mode,
-                                         mutation_mode
+                                         mutation_mode,
+                                         REPETITIONS
                                          )
 
                             # MODELS TRAINING ENDS HERE
