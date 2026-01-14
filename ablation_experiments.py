@@ -1,7 +1,6 @@
 #!python3 ablation_experiments.py
 
 import time
-import csv
 
 from os.path import basename
 from Ablation import *
@@ -233,10 +232,52 @@ def train_baseline_dense_model(
         epsilon_final=0.1,
         epsilon_decay=hp.epsilon_decay,
         learn_interval=hp.steps_learn_interval,
+        min_replay_size=max(1000,2*hp.batch_size),
     )
+    parameters_cnt = sum(p.numel() for p in agent.policy_net.parameters())
+    
+    agent_metrics = ModelTrainMetrics()
+    cum_goals     = 0
+    goal_reached  = np.zeros((hp.episodes),dtype=np.bool) 
+    for episode in range(hp.episodes):
+        cum_reward = 0.0
+        cum_steps  = 0
+        state = env.reset()
+        state = state.reshape(1,-1)
+        for step in range(hp.max_steps):
+            action = agent.act(state, eval=False)
+            next_state, reward, done, extras_dict = env.step(action)
+            if env.isGoal(extras_dict["raw_ns"]):
+                goal_reached[episode] = np.bool(True)
+                cum_goals += 1
+            next_state.reshape(1,-1)
+            agent.remember(state, action, reward, next_state, done)
+            state = next_state
+            cum_reward += reward
+            if done:
+                cum_steps = step 
+                break
 
+        # Convert loss to Python float, handling CUDA tensors
+        if hasattr(agent, 'loss'):
+            if isinstance(agent.loss, torch.Tensor):
+                loss_val = float(agent.loss.cpu().detach())
+            else:
+                loss_val = float(agent.loss) if agent.loss is not None else 0.0
+        else:
+            loss_val = 0.0
 
+        # Succes Rate Calculation
+        success_rate = 0.0
+        if episode >= hp.rolling_window_size:
+            recent_goals = sum(goal_reached[-hp.rolling_window_size:])
+            success_rate = (recent_goals / hp.rolling_window_size) * 100
 
+        agent_metrics.append(episode,cum_reward,cum_goals,success_rate,loss_val,cum_steps,parameters_cnt)
+
+    agent.save(save_path)
+
+    return agent_metrics
 
 def train_models(
     state: AblationProgramState,
@@ -263,9 +304,9 @@ def train_models(
     
     dense_model_dir = os.path.join(state.save_dir_path,"dense_model/")
     os.makedirs(dense_model_dir,exist_ok=True)
-    dense_model_path = os.path.join(dense_model_dir,"metrics.csv")
+    dense_model_path = os.path.join(dense_model_dir,"model.pth")
     
-    train_baseline_dense_model(dense_model_path,
+    baseline_metrics = train_baseline_dense_model(dense_model_path,
                                gym_env_maze,
                                architecute,
                                concrete_arch,
@@ -274,8 +315,9 @@ def train_models(
                                mutation_mode,
                                repetitions
                                )
+    baseline_metrics.save(os.path.join(dense_model_dir,"metrics.csv"))
     
-    train_saecollab_model()
+    saecollab_metrics = train_saecollab_model()
 
 def experiment_1(dir_path:str=None,seed=None):
     dir_path = dir_path or 'experiment_1'
@@ -388,13 +430,14 @@ def experiment_1(dir_path:str=None,seed=None):
             )
         
         hyperparameters = GlobalHyperparameters(
-            learning_rate   = 1e-5,
-            discount_factor = 0.999,
-            epsilon_decay   = epsilon_decay,
-            episodes        = EPISODES,
-            max_steps       = MAX_STEPS,
-            batch_size      = 1024,
-            steps_learn_interval = 4
+            learning_rate        = 1e-5,
+            discount_factor      = 0.999,
+            epsilon_decay        = epsilon_decay,
+            episodes             = EPISODES,
+            max_steps            = MAX_STEPS,
+            batch_size           = 1024,
+            steps_learn_interval = 4,
+            rolling_window_size  = 20
         )
 
         # TRAIN TABULAR MODEL

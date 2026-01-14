@@ -2,6 +2,7 @@
 
 import os
 import json
+import csv
 import subprocess
 import multiprocessing
 from typing import *
@@ -24,7 +25,8 @@ class GlobalHyperparameters:
                  episodes,
                  max_steps,
                  batch_size,
-                 steps_learn_interval
+                 steps_learn_interval,
+                 rolling_window_size
                  ):
         self.learning_rate = learning_rate
         self.discount_factor = discount_factor
@@ -33,6 +35,7 @@ class GlobalHyperparameters:
         self.max_steps       = max_steps
         self.batch_size      = batch_size
         self.steps_learn_interval = steps_learn_interval
+        self.rolling_window_size  = rolling_window_size
 
 class LayerInsertionType(Enum):
     CNT = "CNT" 
@@ -132,7 +135,8 @@ class ModelTrainMetrics:
                  cumulative_goals:List[int]   = None,
                  sucess_rate     :List[float] = None,
                  loss            :List[float] = None,
-                 steps           :List[int]   = None
+                 steps           :List[int]   = None,
+                 parameters_cnt  :List[int]   = None      
                  ):
         self.episode          :List[int]   = episode          or list()
         self.reward           :List[float] = reward           or list()
@@ -140,14 +144,29 @@ class ModelTrainMetrics:
         self.sucess_rate      :List[float] = sucess_rate      or list()
         self.loss             :List[float] = loss             or list()
         self.steps            :List[int]   = steps            or list()
+        self.parameters_cnt   :List[int]   = parameters_cnt   or list()
+
+    def __len__(self):
+        return min(map(len,[self.episode,self.reward,self.cumulative_goals,
+                            self.sucess_rate,self.loss,self.steps,
+                            self.parameters_cnt]))
     
-    def append(self,episode,reward,cumulative_goals,sucess_rate,loss,steps):
+    def append(self,episode,reward,cumulative_goals,sucess_rate,loss,steps,parameters_cnt):
         self.episode          = episode
         self.reward           = reward
         self.cumulative_goals = cumulative_goals
         self.sucess_rate      = sucess_rate
         self.loss             = loss
         self.steps            = steps
+        self.parameters_cnt   = parameters_cnt
+
+    def save(self,path:str):
+        with open(path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            header_row_str = "episode,reward,cumulative_goals,success_rate,training_loss,steps,parameters"
+            writer.writerow(header_row_str.split(","))
+            for idx in range(len(self)):
+                writer.writerow(f"{self.episode[idx]},{self.reward[idx]},{self.cumulative_goals[idx]},{self.success_rate[idx]},{self.training_loss[idx]},{self.steps[idx]},{self.parameters_cnt[idx]}")
 
 class AblationProgramState:
     STATE_JSON_NAME   = ".ablation_state.json"
