@@ -3,6 +3,7 @@
 import os
 import json
 import csv
+import math
 import subprocess
 import multiprocessing
 from typing import *
@@ -26,7 +27,8 @@ class GlobalHyperparameters:
                  max_steps,
                  batch_size,
                  steps_learn_interval,
-                 rolling_window_size
+                 rolling_window_size,
+                 new_layer_learning_rate
                  ):
         self.learning_rate = learning_rate
         self.discount_factor = discount_factor
@@ -36,6 +38,8 @@ class GlobalHyperparameters:
         self.batch_size      = batch_size
         self.steps_learn_interval = steps_learn_interval
         self.rolling_window_size  = rolling_window_size
+        self.new_layer_learning_rate = new_layer_learning_rate
+
 
 class LayerInsertionType(Enum):
     CNT = "CNT" 
@@ -49,8 +53,8 @@ class LayerInsertionType(Enum):
 
 class LayerMode:
     def __init__(self,
-                 is_k_trainable:bool,
-                 use_extra_branch:bool
+                 use_extra_branch:bool,
+                 is_k_trainable:bool
                 ):
         self.is_k_trainable   = is_k_trainable
         self.use_extra_branch = use_extra_branch
@@ -136,29 +140,28 @@ class ModelTrainMetrics:
                  sucess_rate     :List[float] = None,
                  loss            :List[float] = None,
                  steps           :List[int]   = None,
-                 parameters_cnt  :List[int]   = None      
-                 ):
-        self.episode          :List[int]   = episode          or list()
-        self.reward           :List[float] = reward           or list()
-        self.cumulative_goals :List[int]   = cumulative_goals or list()
-        self.sucess_rate      :List[float] = sucess_rate      or list()
-        self.loss             :List[float] = loss             or list()
-        self.steps            :List[int]   = steps            or list()
-        self.parameters_cnt   :List[int]   = parameters_cnt   or list()
+                 parameters_cnt  :List[int]   = None):
+        self.episode          = episode          or []
+        self.reward           = reward           or []
+        self.cumulative_goals = cumulative_goals or []
+        self.sucess_rate      = sucess_rate      or []
+        self.loss             = loss             or []
+        self.steps            = steps            or []
+        self.parameters_cnt   = parameters_cnt   or []
 
     def __len__(self):
-        return min(map(len,[self.episode,self.reward,self.cumulative_goals,
-                            self.sucess_rate,self.loss,self.steps,
-                            self.parameters_cnt]))
-    
-    def append(self,episode,reward,cumulative_goals,sucess_rate,loss,steps,parameters_cnt):
-        self.episode          = episode
-        self.reward           = reward
-        self.cumulative_goals = cumulative_goals
-        self.sucess_rate      = sucess_rate
-        self.loss             = loss
-        self.steps            = steps
-        self.parameters_cnt   = parameters_cnt
+        arrs = [self.episode, self.reward, self.cumulative_goals,
+                self.sucess_rate, self.loss, self.steps, self.parameters_cnt]
+        return min(map(len, arrs))
+
+    def append(self, episode, reward, cumulative_goals, sucess_rate, loss, steps, parameters_cnt):
+        self.episode.append(episode)
+        self.reward.append(reward)
+        self.cumulative_goals.append(cumulative_goals)
+        self.sucess_rate.append(sucess_rate)
+        self.loss.append(loss)
+        self.steps.append(steps)
+        self.parameters_cnt.append(parameters_cnt)
 
     def save(self,path:str):
         with open(path, 'w', newline='') as f:
@@ -166,7 +169,63 @@ class ModelTrainMetrics:
             header_row_str = "episode,reward,cumulative_goals,success_rate,training_loss,steps,parameters"
             writer.writerow(header_row_str.split(","))
             for idx in range(len(self)):
-                writer.writerow(f"{self.episode[idx]},{self.reward[idx]},{self.cumulative_goals[idx]},{self.success_rate[idx]},{self.training_loss[idx]},{self.steps[idx]},{self.parameters_cnt[idx]}")
+                writer.writerow(f"{self.episode[idx]},{self.reward[idx]},{self.cumulative_goals[idx]},{self.sucess_rate[idx]},{self.loss[idx]},{self.steps[idx]},{self.parameters_cnt[idx]}")
+
+    def __str__(self):
+        """Compact summary."""
+        n = len(self)
+        if n == 0:
+            return "ModelTrainMetrics(empty)"
+
+        def last(x): return x[-1]
+        def mean(x): return sum(x)/len(x) if x else math.nan
+
+        return (
+            "ModelTrainMetrics\n"
+            f"  samples          : {n}\n"
+            f"  last episode     : {last(self.episode)}\n"
+            f"  last reward      : {last(self.reward):.4f}\n"
+            f"  last success rate: {last(self.sucess_rate):.4f}\n"
+            f"  last loss        : {last(self.loss):.6f}\n"
+            f"  avg reward       : {mean(self.reward):.4f}\n"
+            f"  avg success rate : {mean(self.sucess_rate):.4f}\n"
+        )
+
+    def pretty_print(self, last_n: int = 10):
+        """Tabular view of the last N entries."""
+        n = len(self)
+        if n == 0:
+            print("ModelTrainMetrics(empty)")
+            return
+
+        start = max(0, n - last_n)
+        headers = ["ep", "reward", "cum_goals", "succ_rate", "loss", "steps", "params"]
+        rows = []
+
+        for i in range(start, n):
+            rows.append([
+                self.episode[i],
+                f"{self.reward[i]:.4f}",
+                self.cumulative_goals[i],
+                f"{self.sucess_rate[i]:.4f}",
+                f"{self.loss[i]:.6f}",
+                self.steps[i],
+                self.parameters_cnt[i],
+            ])
+
+        # column widths
+        cols = list(zip(*([headers] + rows)))
+        widths = [max(len(str(v)) for v in col) for col in cols]
+
+        def fmt(row):
+            return " | ".join(str(v).rjust(w) for v, w in zip(row, widths))
+
+        sep = "-+-".join("-" * w for w in widths)
+
+        print(fmt(headers))
+        print(sep)
+        for r in rows:
+            print(fmt(r))
 
 class AblationProgramState:
     STATE_JSON_NAME   = ".ablation_state.json"
@@ -254,8 +313,8 @@ class AblationProgramState:
         return iteration_num <= self.completed_iteration
     
     def train_tabular_agent(self,maze_path:str,hp:GlobalHyperparameters,
-                            repetitions:int=1):        
-        if repetitions == 1:
+                            runs:int=1):        
+        if runs == 1:
             tabular_save_path = os.path.join(self.save_dir_path,"tabular")
             os.makedirs(tabular_save_path,exist_ok=True)
             subprocess.run(
@@ -273,9 +332,9 @@ class AblationProgramState:
                 check=False,
                 stdout=subprocess.DEVNULL
             )
-        elif repetitions > 1 :
+        elif runs > 1 :
             tabular_processes = []
-            for repetition in range(repetitions):
+            for repetition in range(runs):
                 tabular_save_path = os.path.join(self.save_dir_path,f"tabular_{repetition}")
                 os.makedirs(tabular_save_path,exist_ok=True)
                 seed = self.seed + repetition
@@ -307,7 +366,7 @@ class AblationProgramState:
                 print(f"[INFO] Tabular Process {idx+1} Ended")
 
         else:
-            print(f"[ERROR] Invalid Number of Repetitions {repetitions} For Tabular Agent")
+            print(f"[ERROR] Invalid Number of runs {runs} For Tabular Agent")
             exit(-1)
 
     def get_current_iteration(self, indices: list, dimensions: list) -> int:

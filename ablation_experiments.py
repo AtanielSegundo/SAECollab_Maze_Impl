@@ -4,7 +4,8 @@ import time
 
 from os.path import basename
 from Ablation import *
-from models.QModels import exp_decay_factor_to,TorchDDQN
+from models.QModels import exp_decay_factor_to,TorchDDQN, \
+                           SAECollabDDQN
 
 from env.MazeEnv import *
 from env.MazeWrapper import StateEncoder, MazeGymWrapper
@@ -190,8 +191,144 @@ def save_concrete_arch_info(save_dir:str,concrete_arch:List[LayersConfig]):
     with open(os.path.join(save_dir,"concrete_arch.json"),"w") as f:
         json.dump(concrete_arch_repr,f,indent=4)
 
-def train_saecollab_model():
-    pass
+def eval_agent_deterministic(agent, env, max_steps):
+    """Avalia se agente consegue alcançar goal deterministicamente"""
+    old_epsilon = getattr(agent, "epsilon", None)
+    prev_training = getattr(agent.policy_net, "training", True)
+    agent.policy_net.eval()
+    
+    if hasattr(agent, "epsilon"):
+        agent.epsilon = 0.0
+
+    ns = env.reset()
+    state = ns.reshape(1, -1)
+    reached = False
+
+    with torch.no_grad():
+        for _ in range(max_steps):
+            try:
+                action = agent.act(state, eval=True)
+            except TypeError:
+                action = agent.act(state)
+            next_state, reward, done, extras = env.step(action)
+            if env.isGoal(extras.get("raw_ns", extras)):
+                reached = True
+                break
+            state = next_state.reshape(1, -1)
+            if done:
+                break
+
+    if hasattr(agent, "epsilon") and old_epsilon is not None:
+        agent.epsilon = old_epsilon
+    if prev_training:
+        agent.policy_net.train()
+    return reached
+
+def train_saecollab_model(
+    save_path:str,
+    env: MazeGymWrapper,
+    model_arch:ModelArch,
+    concrete_layer_arch: List[LayersConfig],
+    hp:GlobalHyperparameters,
+    mode_type:LayerModeType,
+    mutation_mode:MutationMode,
+    runs:int
+):  
+    agent = SAECollabDDQN(
+        state_size=env.state_size,
+        action_size=env.action_size,
+        first_hidden_size=int(concrete_layer_arch[0].hidden),
+        hidden_activation=model_arch.activation.hidden,
+        out_activation=model_arch.activation.out(),
+        accelerate_etas=True,
+        lr=[hp.learning_rate,hp.new_layer_learning_rate],
+        gamma=hp.discount_factor,
+        batch_size=hp.batch_size,
+        epsilon_start=1.0,
+        epsilon_final=0.1,
+        epsilon_decay=hp.epsilon_decay,
+        learn_interval=hp.steps_learn_interval,
+        min_replay_size=max(1000,2*hp.batch_size),
+        use_bias=model_arch.use_bias
+    )
+
+    parameters_cnt = sum(p.numel() for p in agent.policy_net.parameters())
+    agent_metrics  = ModelTrainMetrics()
+    cum_goals      = 0
+    goal_reached   = np.zeros((hp.episodes),dtype=np.bool)
+    current_branch = 0
+    branch_insertion_mod = hp.episodes // model_arch.max_layers
+    
+    for episode in range(hp.episodes):
+        cum_reward = 0.0
+        cum_steps  = 0
+        state = env.reset()
+        state = state.reshape(1,-1)
+        
+        for step in range(hp.max_steps):
+            action = agent.act(state, eval=False)
+            next_state, reward, done, extras_dict = env.step(action)
+            if env.isGoal(extras_dict["raw_ns"]):
+                goal_reached[episode] = np.bool(True)
+                cum_goals += 1
+            next_state.reshape(1,-1)
+            agent.remember(state, action, reward, next_state, done)
+            state = next_state
+            cum_reward += reward
+            
+            if done:
+                cum_steps = step 
+                break
+        
+        agent.policy_net.step_all_etas()
+        agent.update_epsilon()
+
+        # Convert loss to Python float, handling CUDA tensors
+        if hasattr(agent, 'loss'):
+            if isinstance(agent.loss, torch.Tensor):
+                loss_val = float(agent.loss.cpu().detach())
+            else:
+                loss_val = float(agent.loss) if agent.loss is not None else 0.0
+        else:
+            loss_val = 0.0
+
+        # Succes Rate Calculation
+        success_rate = 0.0
+        if episode >= hp.rolling_window_size:
+            recent_goals = sum(goal_reached[-hp.rolling_window_size:])
+            success_rate = (recent_goals / hp.rolling_window_size) * 100
+
+        # New Branch Adding Logic
+
+        if episode % branch_insertion_mod:
+            if eval_agent_deterministic(agent,env,hp.max_steps):
+                pass
+            else:
+                current_branch += 1
+                hidden_size = int(concrete_layer_arch[current_branch].hidden)
+                extra_size  = int(concrete_layer_arch[current_branch].extra if mode_type.value.use_extra_branch else 0)
+                agent.add_layer(
+                    layer_hidden_size=hidden_size,
+                    layer_extra_size=extra_size,
+                    mutation_mode=mutation_mode,
+                    target_fn=model_arch.activation.hidden(),
+                    eta=0.0,
+                    eta_increment=1 / branch_insertion_mod,
+                    hidden_activation=model_arch.activation.hidden(),
+                    out_activation=model_arch.activation.out(),
+                    extra_activation=model_arch.activation.extra(),
+                    is_k_trainable= mode_type.value.is_k_trainable
+                )   
+        # End
+
+        agent_metrics.append(episode,cum_reward,cum_goals,success_rate,loss_val,cum_steps,parameters_cnt)        
+
+        if episode % 50 == 0:
+            agent_metrics.pretty_print(10)
+        
+    agent.save(save_path)
+
+    return agent_metrics
 
 def train_baseline_dense_model(
     save_path:str,
@@ -201,8 +338,10 @@ def train_baseline_dense_model(
     hp:GlobalHyperparameters,
     mode_type:LayerModeType,
     mutation_mode:MutationMode,
-    repetitions:int
+    runs:int
 ):
+    if os.path.exists(save_path):
+        return None
     layers = []
     last_width = None
     for i in range(model_arch.max_layers):
@@ -257,6 +396,8 @@ def train_baseline_dense_model(
             if done:
                 cum_steps = step 
                 break
+        
+        agent.update_epsilon()
 
         # Convert loss to Python float, handling CUDA tensors
         if hasattr(agent, 'loss'):
@@ -275,6 +416,9 @@ def train_baseline_dense_model(
 
         agent_metrics.append(episode,cum_reward,cum_goals,success_rate,loss_val,cum_steps,parameters_cnt)
 
+        if episode % 50 == 0:
+            agent_metrics.pretty_print(10)
+
     agent.save(save_path)
 
     return agent_metrics
@@ -288,7 +432,7 @@ def train_models(
     insertion_type: LayerInsertionType,
     mode_type: LayerModeType,
     mutation_mode: MutationMode,
-    repetitions: int
+    runs: int
 ):
     gym_env_maze = MazeGymWrapper(
         maze,
@@ -313,11 +457,26 @@ def train_models(
                                hp,
                                mode_type,
                                mutation_mode,
-                               repetitions
+                               runs
                                )
-    baseline_metrics.save(os.path.join(dense_model_dir,"metrics.csv"))
+    if baseline_metrics:
+        baseline_metrics.save(os.path.join(dense_model_dir,"metrics.csv"))
     
-    saecollab_metrics = train_saecollab_model()
+    sae_model_dir = os.path.join(state.save_dir_path,"sae_model/")
+    os.makedirs(sae_model_dir,exist_ok=True)
+    sae_model_path = os.path.join(sae_model_dir,"model.pth")
+    sae_metrics = train_saecollab_model(sae_model_path,
+                                gym_env_maze,
+                                architecute,
+                                concrete_arch,
+                                hp,
+                                mode_type,
+                                mutation_mode,
+                                runs     
+    )
+    if sae_metrics:
+        sae_metrics.save(os.path.join(dense_model_dir,"metrics.csv"))
+
 
 def experiment_1(dir_path:str=None,seed=None):
     dir_path = dir_path or 'experiment_1'
@@ -343,11 +502,11 @@ def experiment_1(dir_path:str=None,seed=None):
     # USED BY ENV WRAPPERS 
     STATE_REPRESENTATIONS = [
         StateRepresentation(
-            state_encoder=StateEncoder.COORDS,
-            possible_actions_feature= True
+            state_encoder=StateEncoder.ONE_HOT
         ),
         StateRepresentation(
-            state_encoder=StateEncoder.ONE_HOT
+            state_encoder=StateEncoder.COORDS,
+            possible_actions_feature= True
         ),
         StateRepresentation(
             state_encoder=StateEncoder.COORDS_NORM,
@@ -397,7 +556,7 @@ def experiment_1(dir_path:str=None,seed=None):
     MUTATION_MODES  = list(MutationMode)
 
     # VALIDA PARA O MODO TABULAR TAMBEM
-    REPETITIONS = 1
+    runs = 1
 
     COMB_ARRAYS_LIST = [MAZES, STATE_REPRESENTATIONS, ARCHITECTURES, INSERTION_TYPES, LAYER_MODES, MUTATION_MODES]
     DIMENSIONS = [len(arr) for arr in COMB_ARRAYS_LIST]
@@ -427,21 +586,22 @@ def experiment_1(dir_path:str=None,seed=None):
                 final_step=MAX_STEPS,
                 epsilon_start=1.0,
                 convergence_threshold=0.01
-            )
+        )
         
         hyperparameters = GlobalHyperparameters(
-            learning_rate        = 1e-5,
-            discount_factor      = 0.999,
-            epsilon_decay        = epsilon_decay,
-            episodes             = EPISODES,
-            max_steps            = MAX_STEPS,
-            batch_size           = 1024,
-            steps_learn_interval = 4,
-            rolling_window_size  = 20
+            learning_rate           = 1e-5,
+            new_layer_learning_rate = 5e-5,
+            discount_factor         = 0.999,
+            epsilon_decay           = epsilon_decay,
+            episodes                = EPISODES,
+            max_steps               = MAX_STEPS,
+            batch_size              = 1024,
+            steps_learn_interval    = 4,
+            rolling_window_size     = 20
         )
 
         # TRAIN TABULAR MODEL
-        state.train_tabular_agent(maze_path,hyperparameters,REPETITIONS)
+        state.train_tabular_agent(maze_path,hyperparameters,runs)
         state.save_a_star_qtable(maze_path)
         
         first_current_iter = state.completed_iteration
@@ -501,7 +661,7 @@ def experiment_1(dir_path:str=None,seed=None):
                                          insertion_type,
                                          layer_mode,
                                          mutation_mode,
-                                         REPETITIONS
+                                         runs
                                          )
 
                             # MODELS TRAINING ENDS HERE
