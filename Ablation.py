@@ -28,17 +28,23 @@ class GlobalHyperparameters:
                  batch_size,
                  steps_learn_interval,
                  rolling_window_size,
-                 new_layer_learning_rate
+                 new_layer_learning_rate,
+                 insert_patience,
+                 insert_min_variance,
+                 insert_min_goals
                  ):
-        self.learning_rate = learning_rate
-        self.discount_factor = discount_factor
-        self.epsilon_decay   = epsilon_decay
-        self.episodes        = episodes
-        self.max_steps       = max_steps
-        self.batch_size      = batch_size
-        self.steps_learn_interval = steps_learn_interval
-        self.rolling_window_size  = rolling_window_size
+        self.learning_rate           = learning_rate
+        self.discount_factor         = discount_factor
+        self.epsilon_decay           = epsilon_decay
+        self.episodes                = episodes
+        self.max_steps               = max_steps
+        self.batch_size              = batch_size
+        self.steps_learn_interval    = steps_learn_interval
+        self.rolling_window_size     = rolling_window_size
         self.new_layer_learning_rate = new_layer_learning_rate
+        self.insert_patience         = insert_patience
+        self.insert_min_variance     = insert_min_variance
+        self.insert_min_goals        = insert_min_goals
 
 
 class LayerInsertionType(Enum):
@@ -152,7 +158,7 @@ class ModelTrainMetrics:
     def __len__(self):
         arrs = [self.episode, self.reward, self.cumulative_goals,
                 self.sucess_rate, self.loss, self.steps, self.parameters_cnt]
-        return min(map(len, arrs))
+        return len(self.episode)
 
     def append(self, episode, reward, cumulative_goals, sucess_rate, loss, steps, parameters_cnt):
         self.episode.append(episode)

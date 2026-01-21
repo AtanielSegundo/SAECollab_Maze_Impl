@@ -1,6 +1,7 @@
 #!python3 ablation_experiments.py
 
 import time
+import threading
 
 from os.path import basename
 from Ablation import *
@@ -224,7 +225,7 @@ def eval_agent_deterministic(agent, env, max_steps):
         agent.policy_net.train()
     return reached
 
-def train_saecollab_model(
+def train_saecollab_tolerance_model(
     save_path:str,
     env: MazeGymWrapper,
     model_arch:ModelArch,
@@ -234,6 +235,8 @@ def train_saecollab_model(
     mutation_mode:MutationMode,
     runs:int
 ):  
+    if os.path.exists(save_path):
+        return None
     agent = SAECollabDDQN(
         state_size=env.state_size,
         action_size=env.action_size,
@@ -255,10 +258,12 @@ def train_saecollab_model(
     parameters_cnt = sum(p.numel() for p in agent.policy_net.parameters())
     agent_metrics  = ModelTrainMetrics()
     cum_goals      = 0
-    goal_reached   = np.zeros((hp.episodes),dtype=np.bool)
+    goal_reached   = np.zeros((hp.episodes),dtype=bool)
     current_branch = 0
-    branch_insertion_mod = hp.episodes // model_arch.max_layers
-    
+    deterministic_reached = False
+    episodes_since_last_branch = 0
+    # Check if the goal at least once was reached
+    goal_once_reached = False
     for episode in range(hp.episodes):
         cum_reward = 0.0
         cum_steps  = 0
@@ -269,9 +274,10 @@ def train_saecollab_model(
             action = agent.act(state, eval=False)
             next_state, reward, done, extras_dict = env.step(action)
             if env.isGoal(extras_dict["raw_ns"]):
-                goal_reached[episode] = np.bool(True)
+                goal_reached[episode] = True
+                goal_once_reached = True
                 cum_goals += 1
-            next_state.reshape(1,-1)
+            next_state = next_state.reshape(1,-1)
             agent.remember(state, action, reward, next_state, done)
             state = next_state
             cum_reward += reward
@@ -294,14 +300,157 @@ def train_saecollab_model(
         # Succes Rate Calculation
         success_rate = 0.0
         if episode >= hp.rolling_window_size:
-            recent_goals = sum(goal_reached[-hp.rolling_window_size:])
+            start_idx = max(0, episode - hp.rolling_window_size + 1)
+            recent_window = goal_reached[start_idx: episode + 1]
+            recent_goals = int(np.sum(recent_window))
+            success_rate = (recent_goals / hp.rolling_window_size) * 100
+        
+        # New Branch Adding Logic
+        episodes_since_last_branch += 1
+        if (episode >= hp.insert_patience and
+           episode % hp.insert_patience == 0 and
+           current_branch < model_arch.max_layers):
+           
+           if deterministic_reached or (_dr:=eval_agent_deterministic(agent,env,hp.max_steps)):
+                if not deterministic_reached and _dr: 
+                    print("[INFO] Deterministic Reached")
+                deterministic_reached = deterministic_reached or _dr
+           else :
+               w_r         = agent_metrics.reward[-hp.insert_patience:]
+               w_goals     = agent_metrics.cumulative_goals[-hp.insert_patience:]
+               window_mean = np.mean(w_r)
+               window_var  = np.var(w_r)
+               goals_in_window = sum(w_goals)
+
+               if abs(window_mean) > 1e-6:
+                    var_ratio = window_var / abs(window_mean)
+               else:
+                    var_ratio = float('inf')
+               
+               should_add_branch = (
+                    var_ratio < hp.insert_min_variance and
+                    (goals_in_window >= hp.insert_min_goals
+                     or (not goal_once_reached  or current_branch == 0)
+                    ) and episodes_since_last_branch >= hp.insert_patience
+               )
+
+               if should_add_branch:
+                   hidden_size = int(concrete_layer_arch[current_branch].hidden)
+                   extra_size  = int(concrete_layer_arch[current_branch].extra if mode_type.value.use_extra_branch else 0)
+                   agent.add_layer(
+                       layer_hidden_size=hidden_size,
+                       layer_extra_size=extra_size,
+                       mutation_mode=mutation_mode,
+                       target_fn=model_arch.activation.hidden(),
+                       k=1.0,
+                       eta=0.0,
+                       eta_increment=1 / hp.episodes,
+                       hidden_activation=model_arch.activation.hidden(),
+                       out_activation=model_arch.activation.out(),
+                       extra_activation=model_arch.activation.extra(),
+                       is_k_trainable= mode_type.value.is_k_trainable,
+                       use_bias=model_arch.use_bias
+                   )   
+                   current_branch += 1
+                   parameters_cnt = sum(p.numel() for p in agent.policy_net.parameters())
+                   episodes_since_last_branch = 0
+        # End
+        
+        agent_metrics.append(episode,cum_reward,cum_goals,success_rate,loss_val,cum_steps,parameters_cnt)        
+
+        if episode % 50 == 0:
+            agent_metrics.pretty_print(5)
+
+
+    agent.save(save_path)
+
+    return agent_metrics
+
+def train_saecollab_spaced_model(
+    save_path:str,
+    env: MazeGymWrapper,
+    model_arch:ModelArch,
+    concrete_layer_arch: List[LayersConfig],
+    hp:GlobalHyperparameters,
+    mode_type:LayerModeType,
+    mutation_mode:MutationMode,
+    runs:int
+):  
+    if os.path.exists(save_path):
+        return None
+    agent = SAECollabDDQN(
+        state_size=env.state_size,
+        action_size=env.action_size,
+        first_hidden_size=int(concrete_layer_arch[0].hidden),
+        hidden_activation=model_arch.activation.hidden(),
+        out_activation=model_arch.activation.out(),
+        accelerate_etas=True,
+        lr=[hp.learning_rate,hp.new_layer_learning_rate],
+        gamma=hp.discount_factor,
+        batch_size=hp.batch_size,
+        epsilon_start=1.0,
+        epsilon_final=0.1,
+        epsilon_decay=hp.epsilon_decay,
+        learn_interval=hp.steps_learn_interval,
+        min_replay_size=max(1000,2*hp.batch_size),
+        use_bias=model_arch.use_bias
+    )
+
+    parameters_cnt = sum(p.numel() for p in agent.policy_net.parameters())
+    agent_metrics  = ModelTrainMetrics()
+    cum_goals      = 0
+    goal_reached   = np.zeros((hp.episodes),dtype=bool)
+    current_branch = 0
+    branch_insertion_mod = hp.episodes // (model_arch.max_layers+1)
+    deterministic_reached = False
+
+    for episode in range(hp.episodes):
+        cum_reward = 0.0
+        cum_steps  = 0
+        state = env.reset()
+        state = state.reshape(1,-1)
+        
+        for step in range(hp.max_steps):
+            action = agent.act(state, eval=False)
+            next_state, reward, done, extras_dict = env.step(action)
+            if env.isGoal(extras_dict["raw_ns"]):
+                goal_reached[episode] = True
+                cum_goals += 1
+            next_state = next_state.reshape(1,-1)
+            agent.remember(state, action, reward, next_state, done)
+            state = next_state
+            cum_reward += reward
+            cum_steps = step
+            if done:
+                break
+        
+        agent.policy_net.step_all_etas()
+        agent.update_epsilon()
+
+        # Convert loss to Python float, handling CUDA tensors
+        if hasattr(agent, 'loss'):
+            if isinstance(agent.loss, torch.Tensor):
+                loss_val = float(agent.loss.cpu().detach())
+            else:
+                loss_val = float(agent.loss) if agent.loss is not None else 0.0
+        else:
+            loss_val = 0.0
+
+        # Succes Rate Calculation
+        success_rate = 0.0
+        if episode >= hp.rolling_window_size:
+            start_idx = max(0, episode - hp.rolling_window_size + 1)
+            recent_window = goal_reached[start_idx: episode + 1]
+            recent_goals = int(np.sum(recent_window))
             success_rate = (recent_goals / hp.rolling_window_size) * 100
 
         # New Branch Adding Logic
 
-        if (episode+1) % branch_insertion_mod == 0:
-            if eval_agent_deterministic(agent,env,hp.max_steps):
-                print("[INFO] Deterministic Reached")
+        if (episode+1) % branch_insertion_mod == 0 and current_branch < model_arch.max_layers:
+            if deterministic_reached or (_dr:=eval_agent_deterministic(agent,env,hp.max_steps)):
+                if not deterministic_reached and _dr: 
+                    print("[INFO] Deterministic Reached")
+                deterministic_reached = deterministic_reached or _dr
             else:
                 hidden_size = int(concrete_layer_arch[current_branch].hidden)
                 extra_size  = int(concrete_layer_arch[current_branch].extra if mode_type.value.use_extra_branch else 0)
@@ -310,6 +459,7 @@ def train_saecollab_model(
                     layer_extra_size=extra_size,
                     mutation_mode=mutation_mode,
                     target_fn=model_arch.activation.hidden(),
+                    k=1.0,
                     eta=0.0,
                     eta_increment=1 / branch_insertion_mod,
                     hidden_activation=model_arch.activation.hidden(),
@@ -378,7 +528,7 @@ def train_baseline_dense_model(
     
     agent_metrics = ModelTrainMetrics()
     cum_goals     = 0
-    goal_reached  = np.zeros((hp.episodes),dtype=np.bool) 
+    goal_reached  = np.zeros((hp.episodes),dtype=bool) 
     for episode in range(hp.episodes):
         cum_reward = 0.0
         cum_steps  = 0
@@ -388,9 +538,9 @@ def train_baseline_dense_model(
             action = agent.act(state, eval=False)
             next_state, reward, done, extras_dict = env.step(action)
             if env.isGoal(extras_dict["raw_ns"]):
-                goal_reached[episode] = np.bool(True)
+                goal_reached[episode] = True
                 cum_goals += 1
-            next_state.reshape(1,-1)
+            next_state = next_state.reshape(1,-1)
             agent.remember(state, action, reward, next_state, done)
             state = next_state
             cum_reward += reward
@@ -412,7 +562,9 @@ def train_baseline_dense_model(
         # Succes Rate Calculation
         success_rate = 0.0
         if episode >= hp.rolling_window_size:
-            recent_goals = sum(goal_reached[-hp.rolling_window_size:])
+            start_idx = max(0, episode - hp.rolling_window_size + 1)
+            recent_window = goal_reached[start_idx: episode + 1]
+            recent_goals = int(np.sum(recent_window))
             success_rate = (recent_goals / hp.rolling_window_size) * 100
 
         agent_metrics.append(episode,cum_reward,cum_goals,success_rate,loss_val,cum_steps,parameters_cnt)
@@ -423,8 +575,6 @@ def train_baseline_dense_model(
     agent.save(save_path)
 
     return agent_metrics
-
-import threading
 
 def train_models(
     state: AblationProgramState,
@@ -455,13 +605,18 @@ def train_models(
     dense_model_path = os.path.join(dense_model_dir,"model.pth")
     dense_metrics_path = os.path.join(dense_model_dir,"metrics.csv")
     
-    sae_model_dir = os.path.join(state.save_dir_path,"sae_model/")
-    os.makedirs(sae_model_dir,exist_ok=True)
-    sae_model_path = os.path.join(sae_model_dir,"model.pth")
-    sae_metrics_path = os.path.join(sae_model_dir,"metrics.csv")
-    
+    sae_tolerance_model_dir = os.path.join(state.save_dir_path,"sae_tolerance_model/")
+    os.makedirs(sae_tolerance_model_dir,exist_ok=True)
+    sae_tolerance_model_path = os.path.join(sae_tolerance_model_dir,"model.pth")
+    sae_tolerance_metrics_path = os.path.join(sae_tolerance_model_dir,"metrics.csv")
+
+    sae_spaced_model_dir = os.path.join(state.save_dir_path,"sae_spaced_model/")
+    os.makedirs(sae_spaced_model_dir,exist_ok=True)
+    sae_spaced_model_path = os.path.join(sae_spaced_model_dir,"model.pth")
+    sae_spaced_metrics_path = os.path.join(sae_spaced_model_dir,"metrics.csv")
+
     # Thread-safe result storage
-    results = {'baseline': None, 'sae': None}
+    results = {'baseline': None, 'tolerance': None, 'spaced': None}
     
     def train_baseline_thread():
         """Thread function for baseline training"""
@@ -483,13 +638,13 @@ def train_models(
         results['baseline'] = baseline_metrics
         print("[BASELINE] Training complete")
     
-    def train_sae_thread():
+    def train_sae_tolerance_thread():
         """Thread function for SAE training"""
         # Create separate environment for this thread
         env = MazeGymWrapper(maze, **state_repr.opts)
         
-        sae_metrics = train_saecollab_model(
-            sae_model_path,
+        sae_metrics = train_saecollab_tolerance_model(
+            sae_tolerance_model_path,
             env,
             architecute,
             concrete_arch,
@@ -499,21 +654,42 @@ def train_models(
             runs
         )
         if sae_metrics:
-            sae_metrics.save(sae_metrics_path)
-        results['sae'] = sae_metrics
-        print("[SAE] Training complete")
+            sae_metrics.save(sae_tolerance_metrics_path)
+        results['tolerance'] = sae_metrics
+        print("[SAE Tolerance] Training complete")
     
-    # Create and start threads
+    def train_sae_spaced_thread():
+        """Thread function for SAE training"""
+        # Create separate environment for this thread
+        env = MazeGymWrapper(maze, **state_repr.opts)
+        
+        sae_metrics= train_saecollab_spaced_model(
+            sae_spaced_model_path,
+            env,
+            architecute,
+            concrete_arch,
+            hp,
+            mode_type,
+            mutation_mode,
+            runs
+        )
+        if sae_metrics:
+            sae_metrics.save(sae_spaced_metrics_path)
+        results['spaced'] = sae_metrics
+        print("[SAE Spaced] Training complete")
+    
     baseline_thread = threading.Thread(target=train_baseline_thread, name="Baseline-DQN")
-    sae_thread = threading.Thread(target=train_sae_thread, name="SAE-CollabNet")
+    sae_tolerance_thread = threading.Thread(target=train_sae_tolerance_thread, name="SAE-Tolarance")
+    sae_spaced_thread = threading.Thread(target=train_sae_spaced_thread, name="SAE-Spaced")
     
-    print("[INFO] Starting parallel training: Baseline and SAE CollabNet (multithreaded)")
+    print("[INFO] Starting parallel training: Baseline and SAE Nets (multithreaded)")
     baseline_thread.start()
-    sae_thread.start()
+    sae_tolerance_thread.start()
+    sae_spaced_thread.start()
     
-    # Wait for both threads to complete
     baseline_thread.join()
-    sae_thread.join()
+    sae_tolerance_thread.join()
+    sae_spaced_thread.join()
     
     print("[INFO] Parallel training completed")
 
@@ -563,27 +739,27 @@ def experiment_1(dir_path:str=None,seed=None):
     width_delta  = 1 / (N_MAX_LAYERS)
     ARCHITECTURES = [
         ModelArch(N_MAX_LAYERS,
-                  LayersConfig(1/4,1,1/4),
+                  LayersConfig(1/2,1,1/2),
                   LayersConfig(width_delta,1,width_delta),
                   LayersConfig(nn.ReLU,nn.Identity,nn.ReLU),
                   LayersConfig(True,True,True)
                   ),
         ModelArch(N_MAX_LAYERS,
-                  LayersConfig(1/4,1,1/8),
+                  LayersConfig(1/2,1,1/4),
                   LayersConfig(width_delta,1,width_delta),
                   LayersConfig(nn.ReLU,nn.Identity,nn.Identity),
                   LayersConfig(True,True,True)
                   ),
 
         ModelArch(N_MAX_LAYERS,
-                  LayersConfig(1/8,1,1/8),
+                  LayersConfig(1/4,1,1/4),
                   LayersConfig(width_delta,1,width_delta),
                   LayersConfig(nn.ReLU,nn.Identity,nn.Identity),
                   LayersConfig(False,True,False)
                   ),
 
         ModelArch(N_MAX_LAYERS,
-                  LayersConfig(1/8,1,1/4),
+                  LayersConfig(1/4,1,1/2),
                   LayersConfig(width_delta,1,width_delta),
                   LayersConfig(nn.ReLU,nn.Identity,nn.ReLU),
                   LayersConfig(False,True,False)
@@ -617,12 +793,13 @@ def experiment_1(dir_path:str=None,seed=None):
         maze_env = MazeEnv(maze_path, rewards_scaled=False, pass_through_walls=False)
         
         # GLOBAL HYPERPARAMETERS
-        EPISODES  = 200
+        EPISODES  = 300
+        # MAX_STEPS = maze_env.rows * maze_env.cols * len(list(Action))
         MAX_STEPS = maze_env.opens_count * len(list(Action))
         
         epsilon_decay = exp_decay_factor_to(
                 final_epsilon=0.1,
-                final_step=2 * MAX_STEPS * EPISODES,
+                final_step=MAX_STEPS * EPISODES,
                 epsilon_start=1.0,
                 convergence_threshold=0.01
         )
@@ -636,7 +813,10 @@ def experiment_1(dir_path:str=None,seed=None):
             max_steps               = MAX_STEPS,
             batch_size              = 512,
             steps_learn_interval    = 4,
-            rolling_window_size     = 20
+            rolling_window_size     = 20,
+            insert_patience         = 15,
+            insert_min_goals        = 5,
+            insert_min_variance     = 0.6
         )
 
         # TRAIN TABULAR MODEL
