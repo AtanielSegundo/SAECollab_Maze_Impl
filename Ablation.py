@@ -169,7 +169,8 @@ class ModelTrainMetrics:
             header_row_str = "episode,reward,cumulative_goals,success_rate,training_loss,steps,parameters"
             writer.writerow(header_row_str.split(","))
             for idx in range(len(self)):
-                writer.writerow(f"{self.episode[idx]},{self.reward[idx]},{self.cumulative_goals[idx]},{self.sucess_rate[idx]},{self.loss[idx]},{self.steps[idx]},{self.parameters_cnt[idx]}")
+                row = [self.episode[idx],self.reward[idx],self.cumulative_goals[idx],self.sucess_rate[idx],self.loss[idx],self.steps[idx],self.parameters_cnt[idx]]
+                writer.writerow(row)
 
     def __str__(self):
         """Compact summary."""

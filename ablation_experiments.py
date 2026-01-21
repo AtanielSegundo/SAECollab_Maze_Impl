@@ -238,7 +238,7 @@ def train_saecollab_model(
         state_size=env.state_size,
         action_size=env.action_size,
         first_hidden_size=int(concrete_layer_arch[0].hidden),
-        hidden_activation=model_arch.activation.hidden,
+        hidden_activation=model_arch.activation.hidden(),
         out_activation=model_arch.activation.out(),
         accelerate_etas=True,
         lr=[hp.learning_rate,hp.new_layer_learning_rate],
@@ -275,9 +275,8 @@ def train_saecollab_model(
             agent.remember(state, action, reward, next_state, done)
             state = next_state
             cum_reward += reward
-            
+            cum_steps = step
             if done:
-                cum_steps = step 
                 break
         
         agent.policy_net.step_all_etas()
@@ -300,11 +299,10 @@ def train_saecollab_model(
 
         # New Branch Adding Logic
 
-        if episode % branch_insertion_mod:
+        if (episode+1) % branch_insertion_mod == 0:
             if eval_agent_deterministic(agent,env,hp.max_steps):
-                pass
+                print("[INFO] Deterministic Reached")
             else:
-                current_branch += 1
                 hidden_size = int(concrete_layer_arch[current_branch].hidden)
                 extra_size  = int(concrete_layer_arch[current_branch].extra if mode_type.value.use_extra_branch else 0)
                 agent.add_layer(
@@ -317,14 +315,17 @@ def train_saecollab_model(
                     hidden_activation=model_arch.activation.hidden(),
                     out_activation=model_arch.activation.out(),
                     extra_activation=model_arch.activation.extra(),
-                    is_k_trainable= mode_type.value.is_k_trainable
+                    is_k_trainable= mode_type.value.is_k_trainable,
+                    use_bias=model_arch.use_bias
                 )   
+                current_branch += 1
+                parameters_cnt = sum(p.numel() for p in agent.policy_net.parameters())
         # End
 
         agent_metrics.append(episode,cum_reward,cum_goals,success_rate,loss_val,cum_steps,parameters_cnt)        
 
         if episode % 50 == 0:
-            agent_metrics.pretty_print(10)
+            agent_metrics.pretty_print(5)
         
     agent.save(save_path)
 
@@ -393,8 +394,8 @@ def train_baseline_dense_model(
             agent.remember(state, action, reward, next_state, done)
             state = next_state
             cum_reward += reward
+            cum_steps = step 
             if done:
-                cum_steps = step 
                 break
         
         agent.update_epsilon()
@@ -417,11 +418,13 @@ def train_baseline_dense_model(
         agent_metrics.append(episode,cum_reward,cum_goals,success_rate,loss_val,cum_steps,parameters_cnt)
 
         if episode % 50 == 0:
-            agent_metrics.pretty_print(10)
+            agent_metrics.pretty_print(5)
 
     agent.save(save_path)
 
     return agent_metrics
+
+import threading
 
 def train_models(
     state: AblationProgramState,
@@ -446,37 +449,73 @@ def train_models(
                                       insertion_type)
     save_concrete_arch_info(state.save_dir_path,concrete_arch)
     
+    # Prepare directories and paths
     dense_model_dir = os.path.join(state.save_dir_path,"dense_model/")
     os.makedirs(dense_model_dir,exist_ok=True)
     dense_model_path = os.path.join(dense_model_dir,"model.pth")
-    
-    baseline_metrics = train_baseline_dense_model(dense_model_path,
-                               gym_env_maze,
-                               architecute,
-                               concrete_arch,
-                               hp,
-                               mode_type,
-                               mutation_mode,
-                               runs
-                               )
-    if baseline_metrics:
-        baseline_metrics.save(os.path.join(dense_model_dir,"metrics.csv"))
+    dense_metrics_path = os.path.join(dense_model_dir,"metrics.csv")
     
     sae_model_dir = os.path.join(state.save_dir_path,"sae_model/")
     os.makedirs(sae_model_dir,exist_ok=True)
     sae_model_path = os.path.join(sae_model_dir,"model.pth")
-    sae_metrics = train_saecollab_model(sae_model_path,
-                                gym_env_maze,
-                                architecute,
-                                concrete_arch,
-                                hp,
-                                mode_type,
-                                mutation_mode,
-                                runs     
-    )
-    if sae_metrics:
-        sae_metrics.save(os.path.join(dense_model_dir,"metrics.csv"))
-
+    sae_metrics_path = os.path.join(sae_model_dir,"metrics.csv")
+    
+    # Thread-safe result storage
+    results = {'baseline': None, 'sae': None}
+    
+    def train_baseline_thread():
+        """Thread function for baseline training"""
+        # Create separate environment for this thread
+        env = MazeGymWrapper(maze, **state_repr.opts)
+        
+        baseline_metrics = train_baseline_dense_model(
+            dense_model_path,
+            env,
+            architecute,
+            concrete_arch,
+            hp,
+            mode_type,
+            mutation_mode,
+            runs
+        )
+        if baseline_metrics:
+            baseline_metrics.save(dense_metrics_path)
+        results['baseline'] = baseline_metrics
+        print("[BASELINE] Training complete")
+    
+    def train_sae_thread():
+        """Thread function for SAE training"""
+        # Create separate environment for this thread
+        env = MazeGymWrapper(maze, **state_repr.opts)
+        
+        sae_metrics = train_saecollab_model(
+            sae_model_path,
+            env,
+            architecute,
+            concrete_arch,
+            hp,
+            mode_type,
+            mutation_mode,
+            runs
+        )
+        if sae_metrics:
+            sae_metrics.save(sae_metrics_path)
+        results['sae'] = sae_metrics
+        print("[SAE] Training complete")
+    
+    # Create and start threads
+    baseline_thread = threading.Thread(target=train_baseline_thread, name="Baseline-DQN")
+    sae_thread = threading.Thread(target=train_sae_thread, name="SAE-CollabNet")
+    
+    print("[INFO] Starting parallel training: Baseline and SAE CollabNet (multithreaded)")
+    baseline_thread.start()
+    sae_thread.start()
+    
+    # Wait for both threads to complete
+    baseline_thread.join()
+    sae_thread.join()
+    
+    print("[INFO] Parallel training completed")
 
 def experiment_1(dir_path:str=None,seed=None):
     dir_path = dir_path or 'experiment_1'
@@ -537,14 +576,14 @@ def experiment_1(dir_path:str=None,seed=None):
                   ),
 
         ModelArch(N_MAX_LAYERS,
-                  LayersConfig(1/4,1,1/8),
+                  LayersConfig(1/8,1,1/8),
                   LayersConfig(width_delta,1,width_delta),
                   LayersConfig(nn.ReLU,nn.Identity,nn.Identity),
                   LayersConfig(False,True,False)
                   ),
 
         ModelArch(N_MAX_LAYERS,
-                  LayersConfig(1/4,1,1/4),
+                  LayersConfig(1/8,1,1/4),
                   LayersConfig(width_delta,1,width_delta),
                   LayersConfig(nn.ReLU,nn.Identity,nn.ReLU),
                   LayersConfig(False,True,False)
@@ -552,7 +591,7 @@ def experiment_1(dir_path:str=None,seed=None):
     ]
 
     INSERTION_TYPES = list(LayerInsertionType)
-    LAYER_MODES     = list(LayerModeType)
+    LAYER_MODES     = list(LayerModeType)[::-1]
     MUTATION_MODES  = list(MutationMode)
 
     # VALIDA PARA O MODO TABULAR TAMBEM
@@ -583,7 +622,7 @@ def experiment_1(dir_path:str=None,seed=None):
         
         epsilon_decay = exp_decay_factor_to(
                 final_epsilon=0.1,
-                final_step=MAX_STEPS,
+                final_step=2 * MAX_STEPS * EPISODES,
                 epsilon_start=1.0,
                 convergence_threshold=0.01
         )
@@ -595,7 +634,7 @@ def experiment_1(dir_path:str=None,seed=None):
             epsilon_decay           = epsilon_decay,
             episodes                = EPISODES,
             max_steps               = MAX_STEPS,
-            batch_size              = 1024,
+            batch_size              = 512,
             steps_learn_interval    = 4,
             rolling_window_size     = 20
         )

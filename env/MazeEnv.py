@@ -123,10 +123,7 @@ class MazeEnv(Grid):
         )
         if out: return GridCell.WALL
         return GridCell(self.grid[state[0],state[1]])
-
-    def getLastCombIndex(self):
-        return self.comb_indexes[self.comb_indexes_ptr+1]
-        
+    
     def step(self, state: Tuple[int,int], action: Action) -> StepResult:
         delta = action.delta
         next_state = (state[0] + delta[1], state[1] + delta[0])

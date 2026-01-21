@@ -7,7 +7,7 @@ import numpy as np
 import random as rand
 import copy
 
-from StackedCollab.collabNet import SAECollabNet
+from StackedCollab.collabNet import SAECollabNet,LayersConfig,MutationMode
 from collections import deque,namedtuple
 from typing import *
 
@@ -287,13 +287,16 @@ class SAECollabDDQN:
                  learn_interval:int=16,
                  tau:float=0.005, 
                  grad_clip:float=10.0, 
-                 min_replay_size:int=1000
+                 min_replay_size:int=1000,
+                 use_bias:LayersConfig = None
                  ):
         
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.state_size = state_size
         self.action_size = action_size
         
+        use_bias = use_bias or LayersConfig(True,True,True)
+
         # BUILDING NETS
         self.policy_net = SAECollabNet(state_size,
                                        first_hidden_size,
@@ -301,7 +304,8 @@ class SAECollabDDQN:
                                        hidden_activation=hidden_activation,
                                        out_activation=out_activation,
                                        accelerate_etas=accelerate_etas,
-                                       device=self.device
+                                       device=self.device,
+                                       use_bias=use_bias
                                        )
         self.target_net = copy.deepcopy(self.policy_net).to(self.device)        
         self.target_net.eval()
@@ -367,7 +371,7 @@ class SAECollabDDQN:
                   layer_hidden_size,
                   layer_extra_size: Optional[int] = None,
                   k: float = 1.0,
-                  mutation_mode: Optional[str] = None,
+                  mutation_mode: Optional[MutationMode] = None,
                   target_fn: Optional[nn.Module] = None,
                   eta: float = 0.0,
                   eta_increment: float = 0.001,
@@ -375,7 +379,8 @@ class SAECollabDDQN:
                   out_activation: Optional[nn.Module] = None,
                   extra_activation: Optional[nn.Module] = None,
                   accelerate_factor: float = 2.0,
-                  is_k_trainable=True
+                  is_k_trainable=True,
+                  use_bias = None
                   ):
         
         self.policy_net.add_layer(
@@ -391,7 +396,8 @@ class SAECollabDDQN:
             out_activation    = out_activation,
             extra_activation  = extra_activation,
             accelerate_factor = accelerate_factor,
-            is_k_trainable    = is_k_trainable
+            is_k_trainable    = is_k_trainable,
+            use_bias          = use_bias
         )
 
         self.layers_added += 1
