@@ -74,6 +74,17 @@ class LayerModeType(Enum):
     @property
     def tag(self):
         return str(self).split(".")[-1]
+    
+    @staticmethod
+    def from_tag(tag:str) -> Self:
+        if tag == "M1":
+            return LayerModeType.M1
+        elif tag == "M2":
+            return LayerModeType.M2
+        elif tag == "M3":
+            return LayerModeType.M3
+        elif tag == "M4":
+            return LayerModeType.M4
 
 class ModelArch:
     def __init__(self,

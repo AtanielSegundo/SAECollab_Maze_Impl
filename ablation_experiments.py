@@ -2,13 +2,15 @@
 
 import time
 import threading
+import multiprocessing
 
+from typing import *
 from os.path import basename
 from Ablation import *
 from models.QModels import exp_decay_factor_to,TorchDDQN, \
                            SAECollabDDQN
 
-from env.MazeEnv import *
+from env.MazeEnv import MazeEnv
 from env.MazeWrapper import StateEncoder, MazeGymWrapper
 
 from functools import reduce
@@ -358,8 +360,8 @@ def train_saecollab_tolerance_model(
         
         agent_metrics.append(episode,cum_reward,cum_goals,success_rate,loss_val,cum_steps,parameters_cnt)        
 
-        if episode % 50 == 0:
-            agent_metrics.pretty_print(5)
+        #if episode % 50 == 0:
+        #    agent_metrics.pretty_print(5)
 
 
     agent.save(save_path)
@@ -376,6 +378,7 @@ def train_saecollab_spaced_model(
     mutation_mode:MutationMode,
     runs:int
 ):  
+    return None
     if os.path.exists(save_path):
         return None
     agent = SAECollabDDQN(
@@ -474,8 +477,8 @@ def train_saecollab_spaced_model(
 
         agent_metrics.append(episode,cum_reward,cum_goals,success_rate,loss_val,cum_steps,parameters_cnt)        
 
-        if episode % 50 == 0:
-            agent_metrics.pretty_print(5)
+        #if episode % 50 == 0:
+        #    agent_metrics.pretty_print(5)
         
     agent.save(save_path)
 
@@ -569,12 +572,49 @@ def train_baseline_dense_model(
 
         agent_metrics.append(episode,cum_reward,cum_goals,success_rate,loss_val,cum_steps,parameters_cnt)
 
-        if episode % 50 == 0:
-            agent_metrics.pretty_print(5)
+        #if episode % 50 == 0:
+        #    agent_metrics.pretty_print(5)
 
     agent.save(save_path)
 
     return agent_metrics
+
+def train_thread(
+        maze_path:str,
+        model_path:str,
+        metrics_path:str,
+        train_fn:Callable,
+        train_tag:str,
+        hp: GlobalHyperparameters,
+        state_repr: StateRepresentation,
+        concrete_arch: List[LayersConfig],
+        model_arch: ModelArch,
+        mode_type: LayerModeType,
+        mutation_mode: MutationMode,
+        runs: int
+):
+        # Create separate environment for this thread
+        env = MazeGymWrapper(MazeEnv(maze_path),**state_repr.opts)
+        mode_type = LayerModeType.from_tag(mode_type)
+
+        metrics = train_fn(
+            model_path,
+            env,
+            model_arch,
+            concrete_arch,
+            hp,
+            mode_type,
+            mutation_mode,
+            runs
+        )
+        
+        if metrics:
+            metrics.save(metrics_path)
+        
+        print(f"[{train_tag}] Training Complete")
+
+        return metrics
+
 
 def train_models(
     state: AblationProgramState,
@@ -585,7 +625,8 @@ def train_models(
     insertion_type: LayerInsertionType,
     mode_type: LayerModeType,
     mutation_mode: MutationMode,
-    runs: int
+    runs: int,
+    processig_mode:Literal['sequential','threading','multiprocessing'] = 'multiprocessing'
 ):
     gym_env_maze = MazeGymWrapper(
         maze,
@@ -617,81 +658,89 @@ def train_models(
 
     # Thread-safe result storage
     results = {'baseline': None, 'tolerance': None, 'spaced': None}
+
+    train_targets      = [train_baseline_dense_model,
+                          train_saecollab_spaced_model,
+                          train_saecollab_tolerance_model
+                         ]
+    train_targets_tags = ["Baseline","SAE Spaced","SAE Tolerance"]
+    train_targets_model_path = [
+        dense_model_path,
+        sae_spaced_model_path,
+        sae_tolerance_model_path
+    ]
+    train_targets_metrics_path = [
+        dense_metrics_path,
+        sae_spaced_metrics_path,
+        sae_tolerance_metrics_path
+    ]
     
-    def train_baseline_thread():
-        """Thread function for baseline training"""
-        # Create separate environment for this thread
-        env = MazeGymWrapper(maze, **state_repr.opts)
+    args = {
+        "maze_path"    : maze.file_path,
+        "hp"           : hp,
+        "state_repr"   : state_repr,
+        "concrete_arch": concrete_arch,
+        "model_arch"   : architecute,
+        "mode_type"    : mode_type.tag,
+        "mutation_mode": mutation_mode,
+        "runs"         : runs
+    }
+
+    if processig_mode == "sequential":
+        for target,tag,model_path,metric_path in zip(
+            train_targets,train_targets_tags,train_targets_model_path,
+            train_targets_metrics_path
+        ):
+            args["model_path"]   = model_path
+            args["metrics_path"] = metric_path
+            args["train_fn"]     = target
+            args["train_tag"]    = tag
+
+            train_thread(**args)
+            
+        print("[INFO] Sequential training completed")
+
+    if processig_mode == 'multiprocessing':
+        process_poll = []
+        for target,tag,model_path,metric_path in zip(
+            train_targets,train_targets_tags,train_targets_model_path,
+            train_targets_metrics_path
+        ):
+            args["model_path"]   = model_path
+            args["metrics_path"] = metric_path
+            args["train_fn"]     = target
+            args["train_tag"]    = tag
+
+            p = multiprocessing.Process(target=train_thread,kwargs=args)
+            process_poll.append(p)
+            p.start()
         
-        baseline_metrics = train_baseline_dense_model(
-            dense_model_path,
-            env,
-            architecute,
-            concrete_arch,
-            hp,
-            mode_type,
-            mutation_mode,
-            runs
-        )
-        if baseline_metrics:
-            baseline_metrics.save(dense_metrics_path)
-        results['baseline'] = baseline_metrics
-        print("[BASELINE] Training complete")
-    
-    def train_sae_tolerance_thread():
-        """Thread function for SAE training"""
-        # Create separate environment for this thread
-        env = MazeGymWrapper(maze, **state_repr.opts)
+        for p in process_poll:
+            p.join()
+
+        print("[INFO] Multiprocessing training completed")
         
-        sae_metrics = train_saecollab_tolerance_model(
-            sae_tolerance_model_path,
-            env,
-            architecute,
-            concrete_arch,
-            hp,
-            mode_type,
-            mutation_mode,
-            runs
-        )
-        if sae_metrics:
-            sae_metrics.save(sae_tolerance_metrics_path)
-        results['tolerance'] = sae_metrics
-        print("[SAE Tolerance] Training complete")
-    
-    def train_sae_spaced_thread():
-        """Thread function for SAE training"""
-        # Create separate environment for this thread
-        env = MazeGymWrapper(maze, **state_repr.opts)
+
+    if processig_mode == 'threading':
+        thread_poll = []
+
+        for target,tag,model_path,metric_path in zip(
+            train_targets,train_targets_tags,train_targets_model_path,
+            train_targets_metrics_path
+        ):
+            args["model_path"]   = model_path
+            args["metrics_path"] = metric_path
+            args["train_fn"]     = target
+            args["train_tag"]    = tag
+
+            p = threading.Thread(target=train_thread,name=tag,kwargs=args)
+            thread_poll.append(p)
+            p.start()
         
-        sae_metrics= train_saecollab_spaced_model(
-            sae_spaced_model_path,
-            env,
-            architecute,
-            concrete_arch,
-            hp,
-            mode_type,
-            mutation_mode,
-            runs
-        )
-        if sae_metrics:
-            sae_metrics.save(sae_spaced_metrics_path)
-        results['spaced'] = sae_metrics
-        print("[SAE Spaced] Training complete")
-    
-    baseline_thread = threading.Thread(target=train_baseline_thread, name="Baseline-DQN")
-    sae_tolerance_thread = threading.Thread(target=train_sae_tolerance_thread, name="SAE-Tolarance")
-    sae_spaced_thread = threading.Thread(target=train_sae_spaced_thread, name="SAE-Spaced")
-    
-    print("[INFO] Starting parallel training: Baseline and SAE Nets (multithreaded)")
-    baseline_thread.start()
-    sae_tolerance_thread.start()
-    sae_spaced_thread.start()
-    
-    baseline_thread.join()
-    sae_tolerance_thread.join()
-    sae_spaced_thread.join()
-    
-    print("[INFO] Parallel training completed")
+        for p in thread_poll:
+            p.join()
+
+        print("[INFO] Threading training completed")
 
 def experiment_1(dir_path:str=None,seed=None):
     dir_path = dir_path or 'experiment_1'
@@ -712,7 +761,11 @@ def experiment_1(dir_path:str=None,seed=None):
 
     # COMBINATORIAL OPTIONS START
     
-    MAZES = ["./mazes/small_eg.maze","./mazes/medium_eg.maze","./mazes/big_eg.maze"]
+    MAZES = [
+        "./mazes/small_eg.maze",
+        "./mazes/medium_eg.maze",
+        "./mazes/big_eg.maze"
+    ]
 
     # USED BY ENV WRAPPERS 
     STATE_REPRESENTATIONS = [
@@ -793,9 +846,9 @@ def experiment_1(dir_path:str=None,seed=None):
         maze_env = MazeEnv(maze_path, rewards_scaled=False, pass_through_walls=False)
         
         # GLOBAL HYPERPARAMETERS
-        EPISODES  = 300
-        # MAX_STEPS = maze_env.rows * maze_env.cols * len(list(Action))
-        MAX_STEPS = maze_env.opens_count * len(list(Action))
+        EPISODES  = 400
+        MAX_STEPS = maze_env.rows * maze_env.cols * len(list(Action))
+        # MAX_STEPS = maze_env.opens_count * len(list(Action))
         
         epsilon_decay = exp_decay_factor_to(
                 final_epsilon=0.1,
@@ -880,7 +933,8 @@ def experiment_1(dir_path:str=None,seed=None):
                                          insertion_type,
                                          layer_mode,
                                          mutation_mode,
-                                         runs
+                                         runs,
+                                         processig_mode="multiprocessing"
                                          )
 
                             # MODELS TRAINING ENDS HERE

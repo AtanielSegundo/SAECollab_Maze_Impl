@@ -35,44 +35,45 @@ class GridCell(Enum):
 StepResult = namedtuple("StepResult",["reward","nextState","isGoal"])
 
 class Grid:
-	def __init__(self,file_path:str):
-		self.rows = None
-		self.cols = None
-		self.grid = None
-		self.tag  = None
-		if os.path.exists(file_path): 
-			self.read(file_path)
-			self.file_loaded = True
-		else:
-			print(f"[ERROR] File Not Found: {file_path}")
-			self.file_loaded = False
-	
-	def read(self, file_path):
-		base, ext = os.path.basename(file_path).split(".")
-		self.tag  = base 
-		if ext == "maze":
-			with open(file_path, "rb") as f:
-				rows = int.from_bytes(f.read(8), 'little')
-				cols = int.from_bytes(f.read(8), 'little')
-				data = f.read()
+    def __init__(self,file_path:str):
+        self.rows = None
+        self.cols = None
+        self.grid = None
+        self.tag  = None
+        self.file_path = file_path 
+        if os.path.exists(file_path): 
+            self.read(file_path)
+            self.file_loaded = True
+        else:
+            print(f"[ERROR] File Not Found: {file_path}")
+            self.file_loaded = False	
+    
+    def read(self, file_path):
+        base, ext = os.path.basename(file_path).split(".")
+        self.tag  = base 
+        if ext == "maze":
+            with open(file_path, "rb") as f:
+                rows = int.from_bytes(f.read(8), 'little')
+                cols = int.from_bytes(f.read(8), 'little')
+                data = f.read()
 
-			arr = np.frombuffer(data, dtype=np.uint8)
-			self.grid = arr.reshape(rows, cols)
-			self.rows, self.cols = rows, cols
+            arr = np.frombuffer(data, dtype=np.uint8)
+            self.grid = arr.reshape(rows, cols)
+            self.rows, self.cols = rows, cols
 
-		elif ext == "npy":
-			self.grid = np.load(file_path)
-			self.rows, self.cols = self.grid.shape
+        elif ext == "npy":
+            self.grid = np.load(file_path)
+            self.rows, self.cols = self.grid.shape
 	
-	def debug(self):
-		print()
-		print("NAME: ",self.tag)
-		print("ROWS: ",self.rows)
-		print("COLS: ",self.cols)
-		print()
-		for (r,c) in cartesian(range(self.rows),range(self.cols)):
-			print(self.grid[r,c],
-				  	end="\n" if c == self.cols-1 else "\t")
+    def debug(self):
+        print()
+        print("NAME: ",self.tag)
+        print("ROWS: ",self.rows)
+        print("COLS: ",self.cols)
+        print()
+        for (r,c) in cartesian(range(self.rows),range(self.cols)):
+          print(self.grid[r,c],
+                  end="\n" if c == self.cols-1 else "\t")
 
 class MazeEnv(Grid):
     def __init__(self,maze_file_path:str,rewards_scaled=False, pass_through_walls: bool = False):
@@ -83,8 +84,9 @@ class MazeEnv(Grid):
          - Leaving the grid (out-of-bounds) is still treated as a WALL and blocked.
         """
         super().__init__(maze_file_path)
-        self.rewards_scaled = rewards_scaled
+        self.rewards_scaled     = rewards_scaled
         self.pass_through_walls = pass_through_walls
+
         if self.file_loaded:
             coords = np.where(self.grid == GridCell.START.value)
             self.agent_start = (int(coords[0][0]), int(coords[1][0]))
