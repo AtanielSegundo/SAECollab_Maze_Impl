@@ -441,7 +441,12 @@ def main(*args, **kwargs):
         "CRT": SearchFilter("CRT"),
         "DRT": SearchFilter("DRT"),
     }
-    out_file = 'plots/compared_insertion_modes  .png'
+    out_file = 'plots/compared_insertion_modes.png'
+
+    search_filters = {
+        "ALL": SearchFilter("metrics.csv"),
+    }
+    out_file = 'plots/compared_sae_baseline.png'
 
     search_result = traversal_search(search_base, search_targets, search_filters)
 
