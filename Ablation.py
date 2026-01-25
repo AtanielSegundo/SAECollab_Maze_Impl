@@ -189,6 +189,55 @@ class ModelTrainMetrics:
                 row = [self.episode[idx],self.reward[idx],self.cumulative_goals[idx],self.sucess_rate[idx],self.loss[idx],self.steps[idx],self.parameters_cnt[idx]]
                 writer.writerow(row)
 
+    @classmethod
+    def load(cls, path: str) -> 'ModelTrainMetrics':
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Metrics file not found: {path}")
+        
+        episode          = []
+        reward           = []
+        cumulative_goals = []
+        sucess_rate      = []
+        loss             = []
+        steps            = []
+        parameters_cnt   = []
+        
+        try:
+            with open(path, 'r', newline='') as f:
+                reader = csv.DictReader(f)
+                
+                expected_headers = {
+                    'episode', 'reward', 'cumulative_goals', 
+                    'success_rate', 'training_loss', 'steps', 'parameters'
+                }
+                
+                if not expected_headers.issubset(set(reader.fieldnames or [])):
+                    raise ValueError(f"CSV missing required headers. Expected: {expected_headers}, Got: {reader.fieldnames}")
+                
+                for row in reader:
+                    episode.append(int(row['episode']))
+                    reward.append(float(row['reward']))
+                    cumulative_goals.append(int(row['cumulative_goals']))
+                    sucess_rate.append(float(row['success_rate']))
+                    loss.append(float(row['training_loss']))
+                    steps.append(int(row['steps']))
+                    parameters_cnt.append(int(row['parameters']))
+                    
+        except KeyError as e:
+            raise ValueError(f"Missing expected column in CSV: {e}")
+        except ValueError as e:
+            raise ValueError(f"Invalid data format in CSV: {e}")
+        
+        return cls(
+            episode=episode,
+            reward=reward,
+            cumulative_goals=cumulative_goals,
+            sucess_rate=sucess_rate,
+            loss=loss,
+            steps=steps,
+            parameters_cnt=parameters_cnt
+        )
+
     def __str__(self):
         """Compact summary."""
         n = len(self)
