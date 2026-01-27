@@ -405,6 +405,37 @@ def plot_compiled_metrics(
         plt.show()
     return fig
 
+def ablation_traverse(search_base, search_targets, search_filters, plot_save_path):
+    search_result = traversal_search(search_base, search_targets, search_filters)
+
+    target_metrics_keys = list(ModelTrainMetrics().__dict__.keys())
+    compiled_metrics = create_compiled_metrics_structure(
+        search_filters,
+        search_targets,
+        target_metrics_keys
+    )
+
+    compile_all_metrics(search_result, compiled_metrics)
+    
+    all_baselines_compiled = CompiledTrainMetrics(target_metrics_keys)
+    for f_key,compiled_metrics_d in compiled_metrics.items():
+        all_baselines_compiled.extend(compiled_metrics_d['baseline'])
+        
+    plot_compiled_metrics(
+        compiled_metrics,
+        f_keys=list(search_filters.keys()),
+        target='sae',
+        metrics_to_plot=None,
+        smooth_window=10,
+        extra_metrics={"baseline": all_baselines_compiled},
+        out_file=plot_save_path,
+        show=True,
+        title=os.path.basename(plot_save_path).split(".")[0].upper().replace("_"," "),
+        x_lim = (1,len(all_baselines_compiled.comp_metrics[target_metrics_keys[0]])-1)
+    )
+
+    return compiled_metrics, search_result
+
 def main(*args, **kwargs):
     search_base = kwargs.get("base", None) or "./test/333"
 
@@ -420,6 +451,7 @@ def main(*args, **kwargs):
         "M4": SearchFilter("M4")
     }
     out_file = 'plots/compared_methods.png'
+    ablation_traverse(search_base,search_targets,search_filters,out_file)
 
     search_filters = {
         "Hidden": SearchFilter("Hidden"),
@@ -427,13 +459,7 @@ def main(*args, **kwargs):
         "Out"   : SearchFilter("Out"),
     }
     out_file = 'plots/compared_mutations.png'
-
-    search_filters = {
-        "Hidden": SearchFilter("Hidden"),
-        "Normal": SearchFilter("Normal"),
-        "Out"   : SearchFilter("Out"),
-    }
-    out_file = 'plots/compared_mutations.png'
+    ablation_traverse(search_base,search_targets,search_filters,out_file)
 
     search_filters = {
         "ALT": SearchFilter("ALT"),
@@ -442,47 +468,37 @@ def main(*args, **kwargs):
         "DRT": SearchFilter("DRT"),
     }
     out_file = 'plots/compared_insertion_modes.png'
+    ablation_traverse(search_base,search_targets,search_filters,out_file)
+
+    search_filters = {
+        "Linear": SearchFilter("EIdentity"),
+        "ReLU": SearchFilter("EReLU"),
+    }
+    out_file = 'plots/compared_extra_linear_relu.png'
+    ablation_traverse(search_base,search_targets,search_filters,out_file)
+
+    search_filters = {
+        "COORDS": SearchFilter("COORDS"),
+        "ONE_HOT": SearchFilter("ONE_HOT"),
+    }
+    out_file = 'plots/compared_encodes.png'
+    ablation_traverse(search_base,search_targets,search_filters,out_file)
+
+    search_filters = {
+        "Bias": SearchFilter("HTOTET"),
+        "NoBias": SearchFilter("HFOTEF"),
+    }
+    out_file = 'plots/compared_bias.png'
+    ablation_traverse(search_base,search_targets,search_filters,out_file)
 
     search_filters = {
         "ALL": SearchFilter("metrics.csv"),
     }
     out_file = 'plots/compared_sae_baseline.png'
-
-    search_result = traversal_search(search_base, search_targets, search_filters)
-
-    target_metrics_keys = list(ModelTrainMetrics().__dict__.keys())
-    compiled_metrics = create_compiled_metrics_structure(
-        search_filters,
-        search_targets,
-        target_metrics_keys
-    )
-
-    compile_all_metrics(search_result, compiled_metrics)
-    
-    all_baselines_compiled = CompiledTrainMetrics(target_metrics_keys)
-    for f_key,compiled_metrics_d in compiled_metrics.items():
-        all_baselines_compiled.extend(compiled_metrics_d['baseline'])
-
-    plot_compiled_metrics(
-        compiled_metrics,
-        f_keys=list(search_filters.keys()),
-        target='sae',
-        metrics_to_plot=None,
-        smooth_window=10,
-        extra_metrics={"baseline": all_baselines_compiled},
-        out_file=out_file,
-        show=True,
-        disable_variance_shade=True,
-        x_lim = (1,len(all_baselines_compiled.comp_metrics[target_metrics_keys[0]])-1)
-    )
-
-
-    return compiled_metrics, search_result
-
+    ablation_traverse(search_base,search_targets,search_filters,out_file)
 
 if __name__ == "__main__":
     from sys import argv
     
     base_path = argv[-1] if len(argv) > 1 else "./test/333"
-    compiled_metrics, search_result = main(base=base_path)
-    
+    main(base=base_path)
