@@ -6,7 +6,9 @@ import csv
 import math
 import subprocess
 import multiprocessing
+
 from typing import *
+from dataclasses import dataclass
 
 import torch
 import numpy as np
@@ -18,34 +20,20 @@ from env.MazeWrapper import StateEncoder, MazeGymWrapper
 from models.AStar    import AStarQModel
 from models.QTable   import genearate_qtable_from_model
 
+@dataclass
 class GlobalHyperparameters:
-    def __init__(self,
-                 learning_rate,
-                 discount_factor,
-                 epsilon_decay,
-                 episodes,
-                 max_steps,
-                 batch_size,
-                 steps_learn_interval,
-                 rolling_window_size,
-                 new_layer_learning_rate,
-                 insert_patience,
-                 insert_min_variance,
-                 insert_min_goals
-                 ):
-        self.learning_rate           = learning_rate
-        self.discount_factor         = discount_factor
-        self.epsilon_decay           = epsilon_decay
-        self.episodes                = episodes
-        self.max_steps               = max_steps
-        self.batch_size              = batch_size
-        self.steps_learn_interval    = steps_learn_interval
-        self.rolling_window_size     = rolling_window_size
-        self.new_layer_learning_rate = new_layer_learning_rate
-        self.insert_patience         = insert_patience
-        self.insert_min_variance     = insert_min_variance
-        self.insert_min_goals        = insert_min_goals
-
+    learning_rate:float
+    discount_factor:float
+    epsilon_decay:float
+    episodes:int
+    max_steps:int
+    batch_size:int
+    steps_learn_interval:int
+    rolling_window_size:int
+    new_layer_learning_rate:float
+    insert_patience:int
+    insert_min_goals:int
+    insert_min_variance:float
 
 class LayerInsertionType(Enum):
     CNT = "CNT" 
@@ -294,6 +282,13 @@ class ModelTrainMetrics:
         for r in rows:
             print(fmt(r))
 
+@dataclass
+class TrainTargetClosure:
+    fn:Callable[[str,str,str],str]
+    tag:str
+    save_model_path:str
+    save_metrics_path:str
+    
 class AblationProgramState:
     STATE_JSON_NAME   = ".ablation_state.json"
     METRICS_FILE_NAME = "metrics.csv"

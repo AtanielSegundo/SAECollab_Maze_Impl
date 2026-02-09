@@ -471,6 +471,33 @@ def main(*args, **kwargs):
     ablation_traverse(search_base,search_targets,search_filters,out_file)
 
     search_filters = {
+        "M1": SearchFilter("ALT","M1"),
+        "M2": SearchFilter("ALT","M2"),
+        "M3": SearchFilter("ALT","M3"),
+        "M4": SearchFilter("ALT","M4"),
+    }
+    out_file = 'plots/compared_alts_methods.png'
+    ablation_traverse(search_base,search_targets,search_filters,out_file)
+
+    search_filters = {
+        "Arch1": SearchFilter("4_H0.5O1E0.5_HReLUOIdentityEReLU_HTOTET"),
+        "Arch2": SearchFilter("4_H0.5O1E0.25_HReLUOIdentityEIdentity_HTOTET"),
+        "Arch3": SearchFilter("4_H0.25O1E0.5_HReLUOIdentityEReLU_HFOTEF"),
+        "Arch4": SearchFilter("4_H0.25O1E0.25_HReLUOIdentityEIdentity_HFOTEF"),
+    }
+    out_file = 'plots/compared_archs.png'
+    ablation_traverse(search_base,search_targets,search_filters,out_file)
+
+    search_filters = {
+        "Arch4-ALT": SearchFilter("4_H0.25O1E0.25_HReLUOIdentityEIdentity_HFOTEF","ALT"),
+        "Arch4-CNT": SearchFilter("4_H0.25O1E0.25_HReLUOIdentityEIdentity_HFOTEF","CNT"),
+        "Arch4-CRT": SearchFilter("4_H0.25O1E0.25_HReLUOIdentityEIdentity_HFOTEF","CRT"),
+        "Arch4-DRT": SearchFilter("4_H0.25O1E0.25_HReLUOIdentityEIdentity_HFOTEF","DRT"),
+    }
+    out_file = 'plots/compared_archs_insertion.png'
+    ablation_traverse(search_base,search_targets,search_filters,out_file)
+
+    search_filters = {
         "Linear": SearchFilter("EIdentity"),
         "ReLU": SearchFilter("EReLU"),
     }

@@ -172,9 +172,9 @@ print(f"  Min goals before branch: {MIN_GOALS_BEFORE_BRANCH}")
 print(f"{'='*70}\n")
 
 sae_history = {
-    "rewards": [],
-    "goals": [],
-    "recent_avg": [],
+    "rewards"       : [],
+    "goals"         : [],
+    "recent_avg"    : [],
     "variance_ratio": [],
     "branch_changes": []
 }

@@ -198,7 +198,7 @@ def eval_agent_deterministic(agent, env, max_steps):
     """Avalia se agente consegue alcançar goal deterministicamente"""
     old_epsilon = getattr(agent, "epsilon", None)
     prev_training = getattr(agent.policy_net, "training", True)
-    agent.policy_net.eval()
+    agent.policy_net.eval
     
     if hasattr(agent, "epsilon"):
         agent.epsilon = 0.0
@@ -615,7 +615,6 @@ def train_thread(
 
         return metrics
 
-
 def train_models(
     state: AblationProgramState,
     maze: MazeEnv,
@@ -659,22 +658,27 @@ def train_models(
     # Thread-safe result storage
     results = {'baseline': None, 'tolerance': None, 'spaced': None}
 
-    train_targets      = [train_baseline_dense_model,
-                          train_saecollab_spaced_model,
-                          train_saecollab_tolerance_model
-                         ]
-    train_targets_tags = ["Baseline","SAE Spaced","SAE Tolerance"]
-    train_targets_model_path = [
-        dense_model_path,
-        sae_spaced_model_path,
-        sae_tolerance_model_path
+    train_targets = [
+        TrainTargetClosure(
+            tag="SAE Tolerance",
+            fn=train_saecollab_tolerance_model,
+            save_model_path=sae_tolerance_model_path,
+            save_metrics_path=sae_tolerance_metrics_path,
+        ),
+        TrainTargetClosure(
+            tag="Baseline",
+            fn=train_baseline_dense_model,
+            save_model_path=dense_model_path,
+            save_metrics_path=dense_metrics_path
+        ),
+        TrainTargetClosure(
+            tag="SAE Spaced",
+            fn=train_saecollab_spaced_model,
+            save_model_path=sae_spaced_model_path,
+            save_metrics_path=sae_spaced_metrics_path,
+        ),
     ]
-    train_targets_metrics_path = [
-        dense_metrics_path,
-        sae_spaced_metrics_path,
-        sae_tolerance_metrics_path
-    ]
-    
+
     args = {
         "maze_path"    : maze.file_path,
         "hp"           : hp,
@@ -687,14 +691,11 @@ def train_models(
     }
 
     if processig_mode == "sequential":
-        for target,tag,model_path,metric_path in zip(
-            train_targets,train_targets_tags,train_targets_model_path,
-            train_targets_metrics_path
-        ):
-            args["model_path"]   = model_path
-            args["metrics_path"] = metric_path
-            args["train_fn"]     = target
-            args["train_tag"]    = tag
+        for target in train_targets:
+            args["model_path"]   = target.save_model_path
+            args["metrics_path"] = target.save_metrics_path
+            args["train_fn"]     = target.fn
+            args["train_tag"]    = target.tag
 
             train_thread(**args)
             
@@ -702,14 +703,11 @@ def train_models(
 
     if processig_mode == 'multiprocessing':
         process_poll = []
-        for target,tag,model_path,metric_path in zip(
-            train_targets,train_targets_tags,train_targets_model_path,
-            train_targets_metrics_path
-        ):
-            args["model_path"]   = model_path
-            args["metrics_path"] = metric_path
-            args["train_fn"]     = target
-            args["train_tag"]    = tag
+        for target in train_targets:
+            args["model_path"]   = target.save_model_path
+            args["metrics_path"] = target.save_metrics_path
+            args["train_fn"]     = target.fn
+            args["train_tag"]    = target.tag
 
             p = multiprocessing.Process(target=train_thread,kwargs=args)
             process_poll.append(p)
@@ -724,16 +722,13 @@ def train_models(
     if processig_mode == 'threading':
         thread_poll = []
 
-        for target,tag,model_path,metric_path in zip(
-            train_targets,train_targets_tags,train_targets_model_path,
-            train_targets_metrics_path
-        ):
-            args["model_path"]   = model_path
-            args["metrics_path"] = metric_path
-            args["train_fn"]     = target
-            args["train_tag"]    = tag
+        for target in train_targets:
+            args["model_path"]   = target.save_model_path
+            args["metrics_path"] = target.save_metrics_path
+            args["train_fn"]     = target.fn
+            args["train_tag"]    = target.tag
 
-            p = threading.Thread(target=train_thread,name=tag,kwargs=args)
+            p = threading.Thread(target=train_thread,name=target.tag,kwargs=args)
             thread_poll.append(p)
             p.start()
         
@@ -934,7 +929,7 @@ def experiment_1(dir_path:str=None,seed=None):
                                          layer_mode,
                                          mutation_mode,
                                          runs,
-                                         processig_mode="multiprocessing"
+                                         processig_mode="sequential"
                                          )
 
                             # MODELS TRAINING ENDS HERE
