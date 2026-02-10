@@ -8,7 +8,7 @@ import subprocess
 import multiprocessing
 
 from typing import *
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields
 
 import torch
 import numpy as np
@@ -137,93 +137,163 @@ class StateRepresentation:
             tag += f"_{StateRepresentation.VISITED_COUNT_TAG}"
         return tag
 
+import csv
+import os
+import math
+from dataclasses import dataclass, field, fields
+from typing import List
+
+
+@dataclass
 class ModelTrainMetrics:
-    def __init__(self,
-                 episode         :List[int]   = None,
-                 reward          :List[float] = None,
-                 cumulative_goals:List[int]   = None,
-                 sucess_rate     :List[float] = None,
-                 loss            :List[float] = None,
-                 steps           :List[int]   = None,
-                 parameters_cnt  :List[int]   = None):
-        self.episode          = episode          or []
-        self.reward           = reward           or []
-        self.cumulative_goals = cumulative_goals or []
-        self.sucess_rate      = sucess_rate      or []
-        self.loss             = loss             or []
-        self.steps            = steps            or []
-        self.parameters_cnt   = parameters_cnt   or []
+    episode         : List[int]   = field(default_factory=list)
+    reward          : List[float] = field(default_factory=list)
+    cumulative_goals: List[int]   = field(default_factory=list)
+    success_rate    : List[float] = field(default_factory=list)
+    loss            : List[float] = field(default_factory=list)
+    steps           : List[int]   = field(default_factory=list)
+    parameters      : List[int]   = field(default_factory=list)
+    delta_time      : List[float] = field(default_factory=list)
+    branchs         : List[int]   = field(default_factory=list)
+
+    type_map = {
+        'episode'         : int,
+        'cumulative_goals': int,
+        'steps'           : int,
+        'parameters'      : int,
+        'reward'          : float,
+        'success_rate'    : float,
+        'loss'            : float,
+        'delta_time'      : float,
+        'branchs'         : int
+    }
+
+    header_map = {
+        'episode'         : 'episode',          
+        'reward'          : 'reward',
+        
+        'cumulative_goals': 'cumulative_goals',
+        'cum_goals'       : 'cumulative_goals',
+        
+        'success_rate'    : 'success_rate',
+        'sucess_rate'     : 'success_rate',                          # aceita a grafia errada caso exista
+        
+        'training_loss'   : 'loss',
+        'loss'            : 'loss',
+        'steps'           : 'steps',
+        
+        'parameters'      : 'parameters',
+        'params'          : 'parameters',
+        
+        'delta_time'      : 'delta_time',
+
+        'branchs'         : 'branchs',
+    }
+
+
+    def __post_init__(self):
+        self.ordered_metrics = [
+            self.episode,
+            self.reward,
+            self.cumulative_goals,
+            self.success_rate,
+            self.loss,
+            self.steps,
+            self.parameters,
+            self.delta_time,
+            self.branchs
+        ]
+        
+        self.available_metrics = [f.name for f in fields(self.__class__)
+                                  if getattr(f, "default_factory", None) is list]
 
     def __len__(self):
-        arrs = [self.episode, self.reward, self.cumulative_goals,
-                self.sucess_rate, self.loss, self.steps, self.parameters_cnt]
         return len(self.episode)
 
-    def append(self, episode, reward, cumulative_goals, sucess_rate, loss, steps, parameters_cnt):
-        self.episode.append(episode)
-        self.reward.append(reward)
-        self.cumulative_goals.append(cumulative_goals)
-        self.sucess_rate.append(sucess_rate)
-        self.loss.append(loss)
-        self.steps.append(steps)
-        self.parameters_cnt.append(parameters_cnt)
+    def append(self, *args):
+        for idx in range(min(len(args), len(self.ordered_metrics))):
+            self.ordered_metrics[idx].append(args[idx])
 
-    def save(self,path:str):
+    def save(self, path: str):
         with open(path, 'w', newline='') as f:
             writer = csv.writer(f)
-            header_row_str = "episode,reward,cumulative_goals,success_rate,training_loss,steps,parameters"
-            writer.writerow(header_row_str.split(","))
+            writer.writerow(self.available_metrics)
             for idx in range(len(self)):
-                row = [self.episode[idx],self.reward[idx],self.cumulative_goals[idx],self.sucess_rate[idx],self.loss[idx],self.steps[idx],self.parameters_cnt[idx]]
+                row = [metric[idx] for metric in self.ordered_metrics]
                 writer.writerow(row)
 
     @classmethod
     def load(cls, path: str) -> 'ModelTrainMetrics':
         if not os.path.exists(path):
             raise FileNotFoundError(f"Metrics file not found: {path}")
-        
-        episode          = []
-        reward           = []
-        cumulative_goals = []
-        sucess_rate      = []
-        loss             = []
-        steps            = []
-        parameters_cnt   = []
-        
-        try:
-            with open(path, 'r', newline='') as f:
-                reader = csv.DictReader(f)
+
+        data = {name: [] for name in cls.header_map.values()}
+
+        with open(path, 'r', newline='') as f:
+            reader = csv.DictReader(f)
+            if not reader.fieldnames:
+                raise ValueError("CSV file has no header")
+
+            # normalizar headers do CSV para nomes internos
+            csv_to_internal = {}
+            for h in reader.fieldnames:
+                key = h.strip()
+                if key in cls.header_map:
+                    csv_to_internal[key] = cls.header_map[key]
+                else:
+                    # tentar minusculas sem espaços
+                    k2 = key.lower().replace(" ", "_")
+                    if k2 in cls.header_map:
+                        csv_to_internal[key] = cls.header_map[k2]
+
+            # required = {'episode', 'reward', 'cumulative_goals', 'success_rate', 'loss', 'steps', 'parameters'}
+            # mapped = set(csv_to_internal.values())
+            # if not required.issubset(mapped):
+            #     raise ValueError(f"CSV missing required headers. Required (accepted aliases): {required}. Found: {reader.fieldnames}")
+
+            def is_float(s:str):
+                try:
+                    float(s)
+                    return True
+                except ValueError:
+                    return False
+
+            for row_idx, row in enumerate(reader, start=1):
+                try:
+                    for csv_h, internal in csv_to_internal.items():
+                        raw = row.get(csv_h, "").strip()
+                        if is_float(raw):
+                            val = float(raw)
+                        elif raw.isnumeric():
+                            val = int(raw)
+                        else:
+                            val = raw
+                        data[internal].append(val)
                 
-                expected_headers = {
-                    'episode', 'reward', 'cumulative_goals', 
-                    'success_rate', 'training_loss', 'steps', 'parameters'
-                }
-                
-                if not expected_headers.issubset(set(reader.fieldnames or [])):
-                    raise ValueError(f"CSV missing required headers. Expected: {expected_headers}, Got: {reader.fieldnames}")
-                
-                for row in reader:
-                    episode.append(int(row['episode']))
-                    reward.append(float(row['reward']))
-                    cumulative_goals.append(int(row['cumulative_goals']))
-                    sucess_rate.append(float(row['success_rate']))
-                    loss.append(float(row['training_loss']))
-                    steps.append(int(row['steps']))
-                    parameters_cnt.append(int(row['parameters']))
-                    
-        except KeyError as e:
-            raise ValueError(f"Missing expected column in CSV: {e}")
-        except ValueError as e:
-            raise ValueError(f"Invalid data format in CSV: {e}")
-        
+                except ValueError as e:
+                    raise ValueError(f"Invalid data format in CSV at line {row_idx}: {e}")
+
+        # garantir que todos os vetores tenham o mesmo comprimento (preencher com zeros se necessário)
+        lengths = [len(v) for v in data.values()]
+        max_len = max(lengths) if lengths else 0
+
+        for k, v in data.items():
+            if len(v) < max_len:
+                fill_type = cls.type_map.get(k, float)
+                fill_value = fill_type()
+                v.extend([fill_value] * (max_len - len(v)))
+
         return cls(
-            episode=episode,
-            reward=reward,
-            cumulative_goals=cumulative_goals,
-            sucess_rate=sucess_rate,
-            loss=loss,
-            steps=steps,
-            parameters_cnt=parameters_cnt
+            episode=data['episode'],
+            reward=data['reward'],
+            cumulative_goals=data['cumulative_goals'],
+            success_rate=data['success_rate'],
+            loss=data['loss'],
+            steps=data['steps'],
+            parameters=data['parameters'],
+            
+            delta_time=data.get('delta_time', []),
+            branchs=data.get('branchs',[])
         )
 
     def __str__(self):
@@ -232,18 +302,18 @@ class ModelTrainMetrics:
         if n == 0:
             return "ModelTrainMetrics(empty)"
 
-        def last(x): return x[-1]
-        def mean(x): return sum(x)/len(x) if x else math.nan
+        def last(x): return x[-1] if x else None
+        def mean(x): return sum(x) / len(x) if x else math.nan
 
         return (
             "ModelTrainMetrics\n"
             f"  samples          : {n}\n"
             f"  last episode     : {last(self.episode)}\n"
             f"  last reward      : {last(self.reward):.4f}\n"
-            f"  last success rate: {last(self.sucess_rate):.4f}\n"
+            f"  last success rate: {last(self.success_rate):.4f}\n"
             f"  last loss        : {last(self.loss):.6f}\n"
             f"  avg reward       : {mean(self.reward):.4f}\n"
-            f"  avg success rate : {mean(self.sucess_rate):.4f}\n"
+            f"  avg success rate : {mean(self.success_rate):.4f}\n"
         )
 
     def pretty_print(self, last_n: int = 10):
@@ -254,7 +324,7 @@ class ModelTrainMetrics:
             return
 
         start = max(0, n - last_n)
-        headers = ["ep", "reward", "cum_goals", "succ_rate", "loss", "steps", "params"]
+        headers = ["ep", "reward", "cum_goals", "succ_rate", "loss", "steps", "params", "dt"]
         rows = []
 
         for i in range(start, n):
@@ -262,13 +332,14 @@ class ModelTrainMetrics:
                 self.episode[i],
                 f"{self.reward[i]:.4f}",
                 self.cumulative_goals[i],
-                f"{self.sucess_rate[i]:.4f}",
+                f"{self.success_rate[i]:.4f}",
                 f"{self.loss[i]:.6f}",
                 self.steps[i],
-                self.parameters_cnt[i],
+                self.parameters[i],
+                f"{self.delta_time[i]:.3f}" if i < len(self.delta_time) else "",
             ])
 
-        # column widths
+        # calcular larguras das colunas (inclui cabeçalho)
         cols = list(zip(*([headers] + rows)))
         widths = [max(len(str(v)) for v in col) for col in cols]
 
@@ -281,6 +352,7 @@ class ModelTrainMetrics:
         print(sep)
         for r in rows:
             print(fmt(r))
+
 
 @dataclass
 class TrainTargetClosure:

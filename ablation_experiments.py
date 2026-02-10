@@ -4,6 +4,7 @@ import time
 import threading
 import multiprocessing
 
+from datetime import datetime, timedelta
 from typing import *
 from os.path import basename
 from Ablation import *
@@ -16,6 +17,7 @@ from env.MazeWrapper import StateEncoder, MazeGymWrapper
 from functools import reduce
 import torch.nn as nn
 import numpy as np
+import time
 
 def log_experiment_time(start_time, current_iter, total_experiment_iters, save_path, first_current_iter):
     """
@@ -267,6 +269,7 @@ def train_saecollab_tolerance_model(
     # Check if the goal at least once was reached
     goal_once_reached = False
     for episode in range(hp.episodes):
+        epoch_start_time = datetime.now()
         cum_reward = 0.0
         cum_steps  = 0
         state = env.reset()
@@ -357,8 +360,12 @@ def train_saecollab_tolerance_model(
                    parameters_cnt = sum(p.numel() for p in agent.policy_net.parameters())
                    episodes_since_last_branch = 0
         # End
-        
-        agent_metrics.append(episode,cum_reward,cum_goals,success_rate,loss_val,cum_steps,parameters_cnt)        
+        epoch_end_time = datetime.now()
+        delta_time = (epoch_end_time - epoch_start_time).total_seconds()
+        agent_metrics.append(episode,cum_reward,cum_goals,success_rate,
+                             loss_val,cum_steps,parameters_cnt,
+                             delta_time,current_branch
+                             )        
 
         #if episode % 50 == 0:
         #    agent_metrics.pretty_print(5)
@@ -532,7 +539,9 @@ def train_baseline_dense_model(
     agent_metrics = ModelTrainMetrics()
     cum_goals     = 0
     goal_reached  = np.zeros((hp.episodes),dtype=bool) 
+    
     for episode in range(hp.episodes):
+        epoch_start_time = datetime.now()
         cum_reward = 0.0
         cum_steps  = 0
         state = env.reset()
@@ -570,7 +579,11 @@ def train_baseline_dense_model(
             recent_goals = int(np.sum(recent_window))
             success_rate = (recent_goals / hp.rolling_window_size) * 100
 
-        agent_metrics.append(episode,cum_reward,cum_goals,success_rate,loss_val,cum_steps,parameters_cnt)
+        epoch_end_time = datetime.now()
+        delta_time = (epoch_end_time - epoch_start_time).total_seconds()
+        agent_metrics.append(episode,cum_reward,cum_goals,
+                             success_rate,loss_val,cum_steps,
+                             parameters_cnt,delta_time,model_arch.max_layers)
 
         #if episode % 50 == 0:
         #    agent_metrics.pretty_print(5)
@@ -929,7 +942,7 @@ def experiment_1(dir_path:str=None,seed=None):
                                          layer_mode,
                                          mutation_mode,
                                          runs,
-                                         processig_mode="sequential"
+                                         processig_mode="multiprocessing"
                                          )
 
                             # MODELS TRAINING ENDS HERE

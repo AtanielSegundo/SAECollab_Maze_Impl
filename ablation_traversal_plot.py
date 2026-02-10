@@ -52,7 +52,8 @@ class CompiledTrainMetrics:
     
     def compile_metrics(self, m: ModelTrainMetrics):
         for key, compile_arr in self.comp_metrics.items():
-            if key in m.__dict__:
+            maped_key = m.header_map.get(key,None)
+            if maped_key in m.available_metrics:
                 arr = m.__dict__[key]
                 for idx, elem in enumerate(arr):
                     if idx >= len(compile_arr):
@@ -224,7 +225,8 @@ def plot_compiled_metrics(
         f_keys = list(compiled_metrics.keys())
     if metrics_to_plot is None:
         metrics_to_plot = [
-            "reward", "sucess_rate", "cumulative_goals", "loss", "parameters_cnt", "steps"
+            "reward", "success_rate", "cumulative_goals", "loss", "parameters", "steps",
+            "branchs", "delta_time", "cumulative_time"
         ]
 
     # determine target if not given
@@ -251,12 +253,17 @@ def plot_compiled_metrics(
         comp = compiled_metrics.get(f, {}).get(target)
         if comp:
             for mk in metrics_to_plot:
+                # Skip cumulative_time as it's computed from delta_time
+                if mk == "cumulative_time":
+                    continue
                 m, s = _extract_mean_std(comp, mk)
                 max_len = max(max_len, m.size)
     if extra_metrics:
         for comp in extra_metrics.values():
             if hasattr(comp, "comp_metrics"):
                 for mk in metrics_to_plot:
+                    if mk == "cumulative_time":
+                        continue
                     m, s = _extract_mean_std(comp, mk)
                     max_len = max(max_len, m.size)
 
@@ -276,9 +283,21 @@ def plot_compiled_metrics(
             comp = compiled_metrics.get(f, {}).get(target)
             if comp is None:
                 continue
-            means, stds = _extract_mean_std(comp, metric)
-            if means.size == 0:
-                continue
+            
+            # Handle cumulative_time specially
+            if metric == "cumulative_time":
+                delta_means, delta_stds = _extract_mean_std(comp, "delta_time")
+                if delta_means.size == 0:
+                    continue
+                
+                # Compute cumulative sum of means
+                means = np.cumsum(delta_means)
+                # For cumulative variance: Var(Sum) = Sum(Var) for independent variables
+                stds = np.sqrt(np.cumsum(delta_stds**2))
+            else:
+                means, stds = _extract_mean_std(comp, metric)
+                if means.size == 0:
+                    continue
 
             # optionally trim/pad to eps
             if eps and means.size >= eps:
@@ -318,19 +337,40 @@ def plot_compiled_metrics(
             for j, (label, comp) in enumerate(extra_metrics.items()):
                 # comp may be ModelTrainMetrics-like (with lists) or CompiledTrainMetrics
                 if hasattr(comp, "comp_metrics"):
-                    means, stds = _extract_mean_std(comp, metric)
+                    if metric == "cumulative_time":
+                        delta_means, delta_stds = _extract_mean_std(comp, "delta_time")
+                        if delta_means.size > 0:
+                            means = np.cumsum(delta_means)
+                            stds = np.sqrt(np.cumsum(delta_stds**2))
+                        else:
+                            means = np.array([])
+                            stds = np.array([])
+                    else:
+                        means, stds = _extract_mean_std(comp, metric)
                 else:
                     attr_map = {
                         "reward": "reward",
                         "sucess_rate": "sucess_rate",
                         "cumulative_goals": "cumulative_goals",
                         "loss": "loss",
-                        "parameters_cnt": "parameters_cnt",
-                        "steps": "steps"
+                        "parameters_cnt": "parameters",
+                        "steps": "steps",
+                        "branchs": "branchs",
+                        "delta_time": "delta_time"
                     }
-                    arr = getattr(comp, attr_map.get(metric, metric), [])
-                    means = np.array(arr, dtype=float) if arr is not None else np.array([])
-                    stds = np.zeros_like(means)
+                    
+                    if metric == "cumulative_time":
+                        arr = getattr(comp, "delta_time", [])
+                        if arr:
+                            means = np.cumsum(np.array(arr, dtype=float))
+                            stds = np.zeros_like(means)
+                        else:
+                            means = np.array([])
+                            stds = np.array([])
+                    else:
+                        arr = getattr(comp, attr_map.get(metric, metric), [])
+                        means = np.array(arr, dtype=float) if arr is not None else np.array([])
+                        stds = np.zeros_like(means)
 
                 if means.size == 0:
                     continue
@@ -381,6 +421,12 @@ def plot_compiled_metrics(
             ax.set_ylabel("Num Parameters")
         elif metric in ("steps",):
             ax.set_ylabel("Steps per Episode")
+        elif metric in ("branchs",):
+            ax.set_ylabel("Number of Branches")
+        elif metric in ("delta_time",):
+            ax.set_ylabel("Time per Episode (s)")
+        elif metric in ("cumulative_time",):
+            ax.set_ylabel("Cumulative Time (s)")
 
         # if nothing plotted, show placeholder text
         if not plotted_any:
@@ -408,7 +454,7 @@ def plot_compiled_metrics(
 def ablation_traverse(search_base, search_targets, search_filters, plot_save_path):
     search_result = traversal_search(search_base, search_targets, search_filters)
 
-    target_metrics_keys = list(ModelTrainMetrics().__dict__.keys())
+    target_metrics_keys = list(ModelTrainMetrics().available_metrics)
     compiled_metrics = create_compiled_metrics_structure(
         search_filters,
         search_targets,
