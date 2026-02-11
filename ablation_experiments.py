@@ -752,7 +752,8 @@ def train_models(
 
 def experiment_1(dir_path:str=None,
                  seed=None,
-                 TABULAR_QLEARNING_PATH = "./c_qlearning/build/agentTrain.exe"
+                 TABULAR_QLEARNING_PATH = "./c_qlearning/build/agentTrain.exe",
+                 processig_mode="multiprocessing"
                  ):
     dir_path = dir_path or 'experiment_1'
     seed     = seed or 333
@@ -946,7 +947,7 @@ def experiment_1(dir_path:str=None,
                                          layer_mode,
                                          mutation_mode,
                                          runs,
-                                         processig_mode="multiprocessing"
+                                         processig_mode=processig_mode
                                          )
 
                             # MODELS TRAINING ENDS HERE
