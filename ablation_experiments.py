@@ -750,11 +750,12 @@ def train_models(
 
         print("[INFO] Threading training completed")
 
-def experiment_1(dir_path:str=None,seed=None):
+def experiment_1(dir_path:str=None,
+                 seed=None,
+                 TABULAR_QLEARNING_PATH = "./c_qlearning/build/agentTrain.exe"
+                 ):
     dir_path = dir_path or 'experiment_1'
     seed     = seed or 333
-    TABULAR_QLEARNING_PATH = "./c_qlearning/build/agentTrain.exe"
-    
     state = AblationProgramState.load_from_json(dir_path,seed)
     set_seed(seed)
     start_time = time.time()
@@ -881,7 +882,10 @@ def experiment_1(dir_path:str=None,seed=None):
         )
 
         # TRAIN TABULAR MODEL
-        state.train_tabular_agent(maze_path,hyperparameters,runs)
+        try:
+            state.train_tabular_agent(maze_path,hyperparameters,runs)
+        except Exception as e:
+            print(f"[WARNING] Cant Train Tabular Agent: {e}")
         state.save_a_star_qtable(maze_path)
         
         first_current_iter = state.completed_iteration
