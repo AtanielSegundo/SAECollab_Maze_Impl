@@ -484,12 +484,24 @@ def ablation_traverse(search_base, search_targets, search_filters, plot_save_pat
 
 def main(*args, **kwargs):
     search_base = kwargs.get("base", None) or "./test/333"
-
+    
     search_targets = {
         "baseline": "dense_model/metrics.csv",
         "sae": "sae_tolerance_model/metrics.csv"
     }
 
+    if not os.path.exists(search_base):
+        print(f"[ERROR] Invalid Path: {search_base}")
+        return
+
+    if os.path.isfile(search_base):
+        search_filters = {
+            "ALL": SearchFilter("metrics.csv"),
+        } 
+        out_file = f'plots/test.png'
+        ablation_traverse(os.path.dirname(search_base),search_targets,search_filters,out_file)
+        return
+    
     search_filters = {
         "M1": SearchFilter("M1"),
         "M2": SearchFilter("M2"),
