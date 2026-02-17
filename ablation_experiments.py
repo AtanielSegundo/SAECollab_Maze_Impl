@@ -9,7 +9,7 @@ from typing import *
 from os.path import basename
 from Ablation import *
 from models.QModels import exp_decay_factor_to,TorchDDQN, \
-                           SAECollabDDQN
+                           SAECollabDDQN,ReservedSAECollabDDQN,NewLayerCfg
 
 from env.MazeEnv import MazeEnv
 from env.MazeWrapper import StateEncoder, MazeGymWrapper
@@ -375,6 +375,178 @@ def train_saecollab_tolerance_model(
 
     return agent_metrics
 
+
+def train_reserved_saecollab_tolerance_model(
+    save_path:str,
+    env: MazeGymWrapper,
+    model_arch:ModelArch,
+    concrete_layer_arch: List[LayersConfig],
+    hp:GlobalHyperparameters,
+    mode_type:LayerModeType,
+    mutation_mode:MutationMode,
+    runs:int
+):  
+    if os.path.exists(save_path):
+        return None
+
+    # Pre-build all layer configs upfront
+    eta_increment = 1 / hp.episodes
+    reserved_layers_cfg = []
+
+    # First layer (base)
+    reserved_layers_cfg.append(NewLayerCfg(
+        hidden_dim        = int(concrete_layer_arch[0].hidden),
+        out_dim           = env.action_size,
+        extra_dim         = None,
+        mutation_mode     = None,
+        target_fn         = None,
+        k                 = 1.0,
+        eta               = 0.0,
+        eta_increment     = eta_increment,
+        hidden_activation = model_arch.activation.hidden(),
+        out_activation    = model_arch.activation.out(),
+        extra_activation  = model_arch.activation.extra(),
+        is_k_trainable    = mode_type.value.is_k_trainable,
+        use_bias          = model_arch.use_bias
+    ))
+
+    # Remaining layers (reserved but frozen)
+    for i in range(1, model_arch.max_layers):
+        extra_dim = int(concrete_layer_arch[i].extra) if mode_type.value.use_extra_branch else None
+        reserved_layers_cfg.append(NewLayerCfg(
+            hidden_dim        = int(concrete_layer_arch[i].hidden),
+            out_dim           = env.action_size,
+            extra_dim         = extra_dim,
+            mutation_mode     = mutation_mode,
+            target_fn         = model_arch.activation.hidden(),
+            k                 = 1.0,
+            eta               = 0.0,
+            eta_increment     = eta_increment,
+            hidden_activation = model_arch.activation.hidden(),
+            out_activation    = model_arch.activation.out(),
+            extra_activation  = model_arch.activation.extra(),
+            is_k_trainable    = mode_type.value.is_k_trainable,
+            use_bias          = model_arch.use_bias
+        ))
+
+    agent = ReservedSAECollabDDQN(
+        state_size            = env.state_size,
+        action_size           = env.action_size,
+        reserved_layers_cfg   = reserved_layers_cfg,
+        accelerate_etas       = True,
+        accelerate_factor     = 2.0,
+        lr                    = [hp.learning_rate, hp.new_layer_learning_rate],
+        gamma                 = hp.discount_factor,
+        batch_size            = hp.batch_size,
+        epsilon_start         = 1.0,
+        epsilon_final         = 0.1,
+        epsilon_decay         = hp.epsilon_decay,
+        learn_interval        = hp.steps_learn_interval,
+        min_replay_size       = max(1000, 2 * hp.batch_size),
+        use_bias              = model_arch.use_bias
+    )
+
+    parameters_cnt = sum(
+        p.numel() 
+        for layer in agent.policy_net.layers[:agent.policy_net.active_head + 1]
+        for p in layer.parameters()
+    )
+    agent_metrics              = ModelTrainMetrics()
+    cum_goals                  = 0
+    goal_reached               = np.zeros((hp.episodes), dtype=bool)
+    current_branch             = 0
+    deterministic_reached      = False
+    episodes_since_last_branch = 0
+    goal_once_reached          = False
+
+    for episode in range(hp.episodes):
+        epoch_start_time = datetime.now()
+        cum_reward = 0.0
+        cum_steps  = 0
+        state = env.reset()
+        state = state.reshape(1, -1)
+
+        for step in range(hp.max_steps):
+            action = agent.act(state, eval=False)
+            next_state, reward, done, extras_dict = env.step(action)
+            if env.isGoal(extras_dict["raw_ns"]):
+                goal_reached[episode] = True
+                goal_once_reached     = True
+                cum_goals            += 1
+            next_state = next_state.reshape(1, -1)
+            agent.remember(state, action, reward, next_state, done)
+            state      = next_state
+            cum_reward += reward
+            cum_steps   = step
+            if done:
+                break
+
+        agent.policy_net.step_all_etas()
+        agent.update_epsilon()
+
+        if hasattr(agent, 'loss'):
+            if isinstance(agent.loss, torch.Tensor):
+                loss_val = float(agent.loss.cpu().detach())
+            else:
+                loss_val = float(agent.loss) if agent.loss is not None else 0.0
+        else:
+            loss_val = 0.0
+
+        # Success Rate Calculation
+        success_rate = 0.0
+        if episode >= hp.rolling_window_size:
+            start_idx     = max(0, episode - hp.rolling_window_size + 1)
+            recent_window = goal_reached[start_idx: episode + 1]
+            recent_goals  = int(np.sum(recent_window))
+            success_rate  = (recent_goals / hp.rolling_window_size) * 100
+
+        # New Branch Logic — same tolerance criteria, but uses use_next_layer()
+        episodes_since_last_branch += 1
+        max_branches = model_arch.max_layers - 1  # first layer already active
+
+        if (episode >= hp.insert_patience and
+            episode % hp.insert_patience == 0 and
+            current_branch < max_branches):
+
+            if deterministic_reached or (_dr := eval_agent_deterministic(agent, env, hp.max_steps)):
+                if not deterministic_reached and _dr:
+                    print("[INFO] Deterministic Reached")
+                deterministic_reached = deterministic_reached or _dr
+            else:
+                w_r             = agent_metrics.reward[-hp.insert_patience:]
+                w_goals         = agent_metrics.cumulative_goals[-hp.insert_patience:]
+                window_mean     = np.mean(w_r)
+                window_var      = np.var(w_r)
+                goals_in_window = sum(w_goals)
+
+                var_ratio = window_var / abs(window_mean) if abs(window_mean) > 1e-6 else float('inf')
+
+                should_advance = (
+                    var_ratio < hp.insert_min_variance and
+                    (goals_in_window >= hp.insert_min_goals
+                     or (not goal_once_reached or current_branch == 0)
+                    ) and episodes_since_last_branch >= hp.insert_patience
+                )
+
+                if should_advance:
+                    agent.use_next_layer()
+                    current_branch += 1
+                    parameters_cnt = sum(
+                        p.numel() 
+                        for layer in agent.policy_net.layers[:agent.policy_net.active_head + 1]
+                        for p in layer.parameters()
+                    )
+                    episodes_since_last_branch = 0
+
+        epoch_end_time = datetime.now()
+        delta_time     = (epoch_end_time - epoch_start_time).total_seconds()
+        agent_metrics.append(episode, cum_reward, cum_goals, success_rate,
+                             loss_val, cum_steps, parameters_cnt,
+                             delta_time, current_branch)
+
+    agent.save(save_path)
+    return agent_metrics
+
 def train_saecollab_spaced_model(
     save_path:str,
     env: MazeGymWrapper,
@@ -674,7 +846,7 @@ def train_models(
     train_targets = [
         TrainTargetClosure(
             tag="SAE Tolerance",
-            fn=train_saecollab_tolerance_model,
+            fn=train_reserved_saecollab_tolerance_model,
             save_model_path=sae_tolerance_model_path,
             save_metrics_path=sae_tolerance_metrics_path,
         ),
@@ -966,6 +1138,5 @@ def experiment_1(dir_path:str=None,
 
         state.remove_save_path_head()
 
-        
 
 SELECTABLE_EXPERIMENTS = [experiment_1] 

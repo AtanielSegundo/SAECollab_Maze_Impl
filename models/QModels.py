@@ -7,7 +7,8 @@ import numpy as np
 import random as rand
 import copy
 
-from StackedCollab.collabNet import SAECollabNet,LayersConfig,MutationMode
+from StackedCollab.collabNet import ReservedSAECollabNet,SAECollabNet,LayersConfig, \
+                                    MutationMode, NewLayerCfg
 from collections import deque,namedtuple
 from typing import *
 
@@ -464,7 +465,6 @@ class SAECollabDDQN:
             if self.learn_steps % self.target_update == 0:
                 self.target_net.load_state_dict(self.policy_net.state_dict())
 
-
     def load(self, path_policy:str, path_target:str=None):
         self.policy_net = torch.load(path_policy, map_location=self.device,weights_only=False)
         if path_target:
@@ -472,6 +472,224 @@ class SAECollabDDQN:
         else:
             self.target_net = copy.deepcopy(self.policy_net).to(self.device)
         self.target_net.eval()
+
+    def __call__(self, state):
+        if not isinstance(state, torch.Tensor):
+            state = torch.tensor(state, dtype=torch.float32).to(self.device)
+        
+        # Ensure state has batch dimension
+        if state.ndim == 1:
+            state = state.unsqueeze(0)
+            squeeze_output = True
+        else:
+            squeeze_output = False
+        
+        # FIX: Unpack tuple and return only q-values
+        q_values, _, _ = self.policy_net(state)
+        
+        # Remove batch dimension if input was single state
+        if squeeze_output:
+            q_values = q_values.squeeze(0)
+        
+        return q_values.detach().cpu()
+    
+
+
+class ReservedSAECollabDDQN:
+    
+    def __init__(self,
+                 state_size:int,
+                 action_size:int,
+                 # HIPERPARAMETROS SAECOLLAB
+                 reserved_layers_cfg:List[NewLayerCfg],
+                 accelerate_etas: bool = False,
+                 accelerate_factor:float = 2.0,
+                 # HIPERPARAMETROS RL
+                 lr:Union[float,List[float]] = 1e-3,
+                 gamma:float = 0.99,
+                 buffer_size:int = 100000,
+                 batch_size:int = 64,
+                 epsilon_start:float=1.0,
+                 device:Union[str,torch.device]=None,
+                 epsilon_final:float=0.01,
+                 epsilon_decay:float=500.0,
+                 target_update:int=1000,
+                 learn_interval:int=16,
+                 tau:float=0.005, 
+                 grad_clip:float=10.0, 
+                 min_replay_size:int=1000,
+                 use_bias:LayersConfig = None
+                 ):
+        
+        self.device      = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        self.state_size  = state_size
+        self.action_size = action_size
+        
+        use_bias = use_bias or LayersConfig(True,True,True)
+
+        # BUILDING NETS
+        self.policy_net = ReservedSAECollabNet(state_size,
+                                               reserved_layers_cfg,
+                                               device=self.device,
+                                               accelerate_etas=accelerate_etas,
+                                               acelerate_factor=accelerate_factor
+                                               )
+        self.target_net = copy.deepcopy(self.policy_net).to(self.device)        
+        self.target_net.eval()
+        
+        # BACKWARD RELATED
+
+        # LR CAN BE AN FLOAT OR AN ARRAY OF SIZE 1 TO N=LEN(reserved_layers_cfg)
+        # BUT THE INNER REPR SHOULD BE AN ARRAY OF THE SAME SIZE LEN(reserved_layers_cfg)
+
+        if isinstance(lr,float):
+            self.lr = [lr for _ in range(len(reserved_layers_cfg))]
+
+        elif isinstance(lr,list):
+            if len(lr) < len(reserved_layers_cfg):
+                self.lr = lr + [lr[-1] for _ in range(len(reserved_layers_cfg) - len(lr))]
+            elif len(lr) == len(reserved_layers_cfg):
+                self.lr = lr
+            else:
+                self.lr = lr[:len(reserved_layers_cfg)]
+
+        self.optimizer = optim.Adam([{'params': layer.parameters(), 'lr': self.lr[i]}
+                                      for i, layer in enumerate(self.policy_net.layers)])
+        self.set_optimizer_to_head()
+
+        self.loss_fn   = nn.HuberLoss()
+        self.loss      = 0.0 
+
+        self.layers_added    = 0 
+        self.steps_done      = 0
+        self.learn_steps     = 0
+        
+        self.gamma           = gamma
+        self.batch_size      = batch_size
+        self.epsilon_start   = epsilon_start
+        self.epsilon         = epsilon_start
+        self.epsilon_final   = epsilon_final
+        self.epsilon_decay   = epsilon_decay
+        self.target_update   = target_update
+        self.learn_interval  = learn_interval
+        self.tau             = tau
+        self.grad_clip       = grad_clip
+        self.min_replay_size = min_replay_size
+
+        self.replay = ReplayBuffer(capacity=buffer_size)
+    
+    def set_optimizer_to_head(self):
+        for i, group in enumerate(self.optimizer.param_groups):
+            if i != self.policy_net.active_head:
+                group['lr'] = 0.0
+            else:
+                group['lr'] = self.lr[i]
+
+    def update_epsilon(self):
+        """Atualiza epsilon usando decaimento exponencial."""
+        self.epsilon = self.epsilon_final + (self.epsilon_start - self.epsilon_final) * \
+                    np.exp(-self.steps_done / self.epsilon_decay)
+    
+    def act(self, state: np.ndarray, eval: bool = False) -> int:
+        if not eval:
+            self.steps_done += 1
+                        
+        eps = 0.0 if eval else self.epsilon
+        if (not eval) and rand.random() < eps:
+            return rand.randrange(self.action_size)
+        
+        with torch.no_grad():
+            s = torch.from_numpy(np.asarray(state, dtype=np.float32)).to(self.device)
+            if s.ndim == 1:
+                s = s.unsqueeze(0)
+            q, _, _ = self.policy_net(s)
+            return int(torch.argmax(q, dim=1).item())
+
+    def remember(self, state, action, reward, next_state, done):
+        self.replay.push(state, action, float(reward), next_state, bool(done))
+        self.learn_steps += 1
+        if self.learn_steps % self.learn_interval == 0:
+            self.learn()
+
+    def save(self, path_policy:str, path_target:str=None):
+        torch.save(self.policy_net, path_policy)
+        if path_target:
+            torch.save(self.target_net, path_target)
+    
+    def load(self, path_policy:str, path_target:str=None):
+        self.policy_net = torch.load(path_policy, map_location=self.device,weights_only=False)
+        if path_target:
+            self.target_net = torch.load(path_target, map_location=self.device,weights_only=False)
+        else:
+            self.target_net = copy.deepcopy(self.policy_net).to(self.device)
+        self.target_net.eval()
+
+    def use_next_layer(self):
+        self.policy_net.use_next_layer()
+        self.target_net.use_next_layer()
+        self.layers_added += 1
+        self.set_optimizer_to_head()
+
+    def learn(self):
+        if len(self.replay) < self.min_replay_size:
+            return None
+
+        batch = self.replay.sample(self.batch_size)
+
+        def stack_states(list_of_states):
+            arrs = [np.asarray(s, dtype=np.float32).reshape(-1) for s in list_of_states]
+            return np.vstack(arrs)
+                
+        states = stack_states(batch.state)
+        next_states = stack_states(batch.next_state)
+    
+        actions = np.array(batch.action, dtype=np.int64)
+        rewards = np.array(batch.reward, dtype=np.float32)
+        dones   = np.array(batch.done, dtype=np.uint8)
+
+        states_t = torch.from_numpy(states).float().to(self.device)         # (B, S)
+        next_states_t = torch.from_numpy(next_states).float().to(self.device)
+        actions_t = torch.from_numpy(actions).long().to(self.device)
+        rewards_t = torch.from_numpy(rewards).float().to(self.device)
+        dones_t = torch.from_numpy(dones).float().to(self.device)
+
+        q_values_all, _, _ = self.policy_net(states_t)
+        q_values = q_values_all.gather(1, actions_t.unsqueeze(1)).squeeze(1)
+
+        with torch.no_grad():
+            next_q_values_all, _, _ = self.policy_net(next_states_t)
+            next_actions = next_q_values_all.argmax(1)
+            
+            target_next_q_all, _, _ = self.target_net(next_states_t)
+            next_q = target_next_q_all.gather(1, next_actions.unsqueeze(1)).squeeze(1)
+            
+            target_q = rewards_t + self.gamma * next_q * (1.0 - dones_t)
+
+        self.loss = self.loss_fn(q_values, target_q)
+
+        self.optimizer.zero_grad()
+        self.loss.backward()
+        
+        # TODO: REFERENCIAR O VALOR USADO NO GRAD CLIPING
+        torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), self.grad_clip)
+        self.optimizer.step()
+        self.learn_steps += 1
+    
+        # POLYAK UPDATE
+        if self.tau and self.tau > 0:
+            active_head = self.policy_net.active_head
+            policy_params = [p for layer in self.policy_net.layers[:active_head + 1]
+                            for p in layer.parameters()]
+            target_params = [p for layer in self.target_net.layers[:active_head + 1]
+                            for p in layer.parameters()]
+            with torch.no_grad():
+                for p, tp in zip(policy_params, target_params):
+                    tp.data.mul_(1.0 - self.tau)
+                    tp.data.add_(self.tau * p.data)
+        else:
+            if self.learn_steps % self.target_update == 0:
+                self.target_net.load_state_dict(self.policy_net.state_dict())
+        
 
     def __call__(self, state):
         if not isinstance(state, torch.Tensor):
