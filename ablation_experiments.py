@@ -1138,5 +1138,207 @@ def experiment_1(dir_path:str=None,
 
         state.remove_save_path_head()
 
+def fast_experiment_1(dir_path:str=None,
+                      seed=None,
+                      TABULAR_QLEARNING_PATH = "./c_qlearning/build/agentTrain.exe",
+                      max_workers=16,
+                      **kwargs):
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
+    dir_path = dir_path or 'experiment_1'
+    state = AblationProgramState.load_from_json(dir_path,seed)
+    seed     = seed or 333
+    set_seed(seed)
 
-SELECTABLE_EXPERIMENTS = [experiment_1] 
+    start_time = time.time()
+
+    if state is None:
+        state = AblationProgramState(
+            TABULAR_QLEARNING_PATH,
+            dir_path,
+            seed
+        )
+        state.env_update()
+
+    # COMBINATORIAL OPTIONS START
+    
+    MAZES = [
+        "./mazes/small_eg.maze",
+        "./mazes/medium_eg.maze",
+        "./mazes/big_eg.maze"
+    ]
+
+    # USED BY ENV WRAPPERS 
+    STATE_REPRESENTATIONS = [
+        StateRepresentation(
+            state_encoder=StateEncoder.ONE_HOT
+        ),
+        StateRepresentation(
+            state_encoder=StateEncoder.COORDS,
+            possible_actions_feature= True
+        ),
+        StateRepresentation(
+            state_encoder=StateEncoder.COORDS_NORM,
+            num_last_states=2,
+            visited_count=True
+        ),
+        StateRepresentation(
+            state_encoder=StateEncoder.ONE_HOT,
+            possible_actions_feature=True,
+        ),
+    ]
+
+    N_MAX_LAYERS = 4 
+    # GARANTINDO QUE ATE O ULTIMO LAYER TENHAM VARIAÇÕES VALIDAS
+    width_delta  = 1 / (N_MAX_LAYERS)
+    ARCHITECTURES = [
+        ModelArch(N_MAX_LAYERS,
+                  LayersConfig(1/2,1,1/2),
+                  LayersConfig(width_delta,1,width_delta),
+                  LayersConfig(nn.ReLU,nn.Identity,nn.ReLU),
+                  LayersConfig(True,True,True)
+                  ),
+        ModelArch(N_MAX_LAYERS,
+                  LayersConfig(1/2,1,1/4),
+                  LayersConfig(width_delta,1,width_delta),
+                  LayersConfig(nn.ReLU,nn.Identity,nn.Identity),
+                  LayersConfig(True,True,True)
+                  ),
+
+        ModelArch(N_MAX_LAYERS,
+                  LayersConfig(1/4,1,1/4),
+                  LayersConfig(width_delta,1,width_delta),
+                  LayersConfig(nn.ReLU,nn.Identity,nn.Identity),
+                  LayersConfig(False,True,False)
+                  ),
+
+        ModelArch(N_MAX_LAYERS,
+                  LayersConfig(1/4,1,1/2),
+                  LayersConfig(width_delta,1,width_delta),
+                  LayersConfig(nn.ReLU,nn.Identity,nn.ReLU),
+                  LayersConfig(False,True,False)
+                  ),
+    ]
+
+    INSERTION_TYPES = list(LayerInsertionType)
+    LAYER_MODES     = list(LayerModeType)[::-1]
+    MUTATION_MODES  = list(MutationMode)
+
+    # VALIDA PARA O MODO TABULAR TAMBEM
+    runs = 1
+
+    COMB_ARRAYS_LIST = [MAZES, STATE_REPRESENTATIONS, ARCHITECTURES, INSERTION_TYPES, LAYER_MODES, MUTATION_MODES]
+    DIMENSIONS = [len(arr) for arr in COMB_ARRAYS_LIST]
+    TOTAL_EXPERIMENT_ITERS = reduce(lambda x,y : x * y, DIMENSIONS)
+    
+    # Get starting indices for resuming
+    skip_indices = state.get_skip_indices(DIMENSIONS)
+    print(f"[INFO] Starting from indices: {skip_indices}")
+    print(f"[INFO] Completed iterations: {state.completed_iteration + 1}/{TOTAL_EXPERIMENT_ITERS}")
+
+    # COMBINATORIAL OPTIONS END    
+
+    all_jobs = []
+
+    for maze_idx, maze_path in enumerate(MAZES):
+        maze_env = MazeEnv(maze_path, rewards_scaled=False, pass_through_walls=False)
+
+        # GLOBAL HYPERPARAMETERS
+        EPISODES  = 400
+        MAX_STEPS = maze_env.rows * maze_env.cols * len(list(Action))
+        # MAX_STEPS = maze_env.opens_count * len(list(Action))
+        
+        epsilon_decay = exp_decay_factor_to(
+                final_epsilon=0.1,
+                final_step=MAX_STEPS * EPISODES,
+                epsilon_start=1.0,
+                convergence_threshold=0.01
+        )
+        
+        hyperparameters = GlobalHyperparameters(
+            learning_rate           = 1e-5,
+            new_layer_learning_rate = 5e-5,
+            discount_factor         = 0.999,
+            epsilon_decay           = epsilon_decay,
+            episodes                = EPISODES,
+            max_steps               = MAX_STEPS,
+            batch_size              = 512,
+            steps_learn_interval    = 4,
+            rolling_window_size     = 20,
+            insert_patience         = 15,
+            insert_min_goals        = 5,
+            insert_min_variance     = 0.6
+        )
+
+        # TRAIN TABULAR MODEL
+        try:
+            state.train_tabular_agent(maze_path,hyperparameters,runs)
+        except Exception as e:
+            print(f"[WARNING] Cant Train Tabular Agent: {e}")
+        state.save_a_star_qtable(maze_path)
+        
+        for state_representation in STATE_REPRESENTATIONS:
+            for arch in ARCHITECTURES:
+                for insertion_type in INSERTION_TYPES:
+                    for layer_mode in LAYER_MODES:
+                        for mutation_mode in MUTATION_MODES:
+
+                            gym_env = MazeGymWrapper(maze_env, **state_representation.opts)
+                            base_width = gym_env.action_size * maze_env.rows * maze_env.cols
+                            concrete_arch = gen_concrete_arch(base_width, gym_env, arch, insertion_type)
+
+                            save_dir = os.path.join(
+                                dir_path, str(seed),
+                                basename(maze_path).split(".")[0],
+                                state_representation.tag,
+                                arch.tag,
+                                insertion_type.tag,
+                                layer_mode.tag,
+                                str(mutation_mode).split(".")[-1]
+                            )
+                            os.makedirs(save_dir, exist_ok=True)
+
+                            for train_fn, subdir in [
+                                (train_reserved_saecollab_tolerance_model, "sae_tolerance_model"),
+                                (train_baseline_dense_model,               "dense_model"),
+                            ]:
+                                model_dir    = os.path.join(save_dir, subdir)
+                                model_path   = os.path.join(model_dir, "model.pth")
+                                metrics_path = os.path.join(model_dir, "metrics.csv")
+                                os.makedirs(model_dir, exist_ok=True)
+
+                                if not os.path.exists(model_path):
+                                    all_jobs.append({
+                                        "maze_path"    : maze_path,
+                                        "model_path"   : model_path,
+                                        "metrics_path" : metrics_path,
+                                        "train_fn"     : train_fn,
+                                        "train_tag"    : subdir,
+                                        "hp"           : hyperparameters,
+                                        "state_repr"   : state_representation,
+                                        "concrete_arch": concrete_arch,
+                                        "model_arch"   : arch,
+                                        "mode_type"    : layer_mode.tag,
+                                        "mutation_mode": mutation_mode,
+                                        "runs"         : 1
+                                    })
+
+    total = len(all_jobs)
+    done  = 0
+    print(f"[INFO] Total jobs: {total}")
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(train_thread, **job): job for job in all_jobs}
+        for future in as_completed(futures):
+            done += 1
+            print(f"[{done}/{total}] done", end="\r")
+            try:
+                future.result()
+            except Exception as e:
+                print(f"\n[ERROR] {futures[future]['model_path']}: {e}")
+
+    print(f"\n[INFO] All {total} jobs complete")
+
+
+
+SELECTABLE_EXPERIMENTS = [experiment_1,fast_experiment_1] 

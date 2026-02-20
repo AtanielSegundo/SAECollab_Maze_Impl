@@ -560,7 +560,11 @@ class AblationProgramState:
         ablation_state.save_dir_path = experiment_path
 
         return ablation_state
-    
+
+import shutil
+def ablation_clean_dir(path:str) -> None:
+    if path and os.path.isdir(path):
+        shutil.rmtree(path)    
 
 def set_seed(seed):
     """Set seeds for reproducibility across numpy, random, torch."""

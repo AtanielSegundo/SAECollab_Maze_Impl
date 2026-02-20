@@ -1,7 +1,6 @@
-import shutil
-import os
 from sys import argv
 from typing import Callable
+from Ablation import ablation_clean_dir
 from ablation_experiments import SELECTABLE_EXPERIMENTS
 
 if __name__ == "__main__":
@@ -51,7 +50,6 @@ if __name__ == "__main__":
             break
 
     if (flag := "--clean") in args:
-        if custom_dir_path and os.path.exists(custom_dir_path):
-            shutil.rmtree(custom_dir_path)
+        ablation_clean_dir(custom_dir_path)
 
     experiment(custom_dir_path,custom_seed)
