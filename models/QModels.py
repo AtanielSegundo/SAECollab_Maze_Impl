@@ -532,7 +532,7 @@ class ReservedSAECollabDDQN:
                                                reserved_layers_cfg,
                                                device=self.device,
                                                accelerate_etas=accelerate_etas,
-                                               acelerate_factor=accelerate_factor
+                                               accelerate_factor=accelerate_factor
                                                )
         self.target_net = copy.deepcopy(self.policy_net).to(self.device)        
         self.target_net.eval()

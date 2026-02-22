@@ -824,24 +824,17 @@ def train_models(
                                       insertion_type)
     save_concrete_arch_info(state.save_dir_path,concrete_arch)
     
+    def create_out_paths(model_name:str) -> None:
+        model_dir = os.path.join(state.save_dir_path,model_name)
+        os.makedirs(model_dir,exist_ok=True)    
+        model_path   = os.path.join(model_dir,"model.pth")
+        metrics_path = os.path.join(model_dir,"metrics.csv")
+        return model_path,metrics_path
+
     # Prepare directories and paths
-    dense_model_dir = os.path.join(state.save_dir_path,"dense_model/")
-    os.makedirs(dense_model_dir,exist_ok=True)
-    dense_model_path = os.path.join(dense_model_dir,"model.pth")
-    dense_metrics_path = os.path.join(dense_model_dir,"metrics.csv")
-    
-    sae_tolerance_model_dir = os.path.join(state.save_dir_path,"sae_tolerance_model/")
-    os.makedirs(sae_tolerance_model_dir,exist_ok=True)
-    sae_tolerance_model_path = os.path.join(sae_tolerance_model_dir,"model.pth")
-    sae_tolerance_metrics_path = os.path.join(sae_tolerance_model_dir,"metrics.csv")
-
-    sae_spaced_model_dir = os.path.join(state.save_dir_path,"sae_spaced_model/")
-    os.makedirs(sae_spaced_model_dir,exist_ok=True)
-    sae_spaced_model_path = os.path.join(sae_spaced_model_dir,"model.pth")
-    sae_spaced_metrics_path = os.path.join(sae_spaced_model_dir,"metrics.csv")
-
-    # Thread-safe result storage
-    results = {'baseline': None, 'tolerance': None, 'spaced': None}
+    dense_model_path,dense_metrics_path = create_out_paths("dense_model")
+    sae_tolerance_model_path,sae_tolerance_metrics_path = create_out_paths("sae_tolerance_model")
+    sae_spaced_model_path,sae_spaced_metrics_path = create_out_paths("sae_spaced_model")
 
     train_targets = [
         TrainTargetClosure(
@@ -856,13 +849,24 @@ def train_models(
             save_model_path=dense_model_path,
             save_metrics_path=dense_metrics_path
         ),
-        TrainTargetClosure(
-            tag="SAE Spaced",
-            fn=train_saecollab_spaced_model,
-            save_model_path=sae_spaced_model_path,
-            save_metrics_path=sae_spaced_metrics_path,
-        ),
     ]
+
+    # Comparation of SAE Tolerance methods
+    # reserved_tolerance_model_path,reserved_tolerance_metrics_path = create_out_paths("reserved_sae_tolerance_model")
+    # train_targets = [
+    #     TrainTargetClosure(
+    #         tag="Reserved SAE Tolerance",
+    #         fn=train_reserved_saecollab_tolerance_model,
+    #         save_model_path=reserved_tolerance_model_path,
+    #         save_metrics_path=reserved_tolerance_metrics_path
+    #     ),
+    #     TrainTargetClosure(
+    #         tag="Dyn SAE Tolerance",
+    #         fn=train_saecollab_tolerance_model,
+    #         save_model_path=sae_tolerance_model_path,
+    #         save_metrics_path=sae_tolerance_metrics_path,
+    #     )
+    # ]    
 
     args = {
         "maze_path"    : maze.file_path,
@@ -925,7 +929,7 @@ def train_models(
 def experiment_1(dir_path:str=None,
                  seed=None,
                  TABULAR_QLEARNING_PATH = "./c_qlearning/build/agentTrain.exe",
-                 processig_mode="multiprocessing"
+                 processig_mode="sequential"
                  ):
     dir_path = dir_path or 'experiment_1'
     seed     = seed or 333
