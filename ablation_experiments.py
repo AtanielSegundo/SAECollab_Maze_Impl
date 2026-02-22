@@ -1147,14 +1147,12 @@ def fast_experiment_1(dir_path:str=None,
                       TABULAR_QLEARNING_PATH = "./c_qlearning/build/agentTrain.exe",
                       max_workers=16,
                       **kwargs):
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import ProcessPoolExecutor, as_completed
     
     dir_path = dir_path or 'experiment_1'
     state = AblationProgramState.load_from_json(dir_path,seed)
     seed     = seed or 333
     set_seed(seed)
-
-    start_time = time.time()
 
     if state is None:
         state = AblationProgramState(
@@ -1331,7 +1329,7 @@ def fast_experiment_1(dir_path:str=None,
     done  = 0
     print(f"[INFO] Total jobs: {total}")
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+    with ProcessPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(train_thread, **job): job for job in all_jobs}
         for future in as_completed(futures):
             done += 1
