@@ -15,6 +15,7 @@ from env.MazeEnv import MazeEnv
 from env.MazeWrapper import StateEncoder, MazeGymWrapper
 
 from functools import reduce
+from collections import deque
 import torch.nn as nn
 import numpy as np
 import time
@@ -237,7 +238,8 @@ def train_saecollab_tolerance_model(
     hp:GlobalHyperparameters,
     mode_type:LayerModeType,
     mutation_mode:MutationMode,
-    runs:int
+    runs:int,
+    verbose:bool = True
 ):  
     if os.path.exists(save_path):
         return None
@@ -318,7 +320,8 @@ def train_saecollab_tolerance_model(
            
            if deterministic_reached or (_dr:=eval_agent_deterministic(agent,env,hp.max_steps)):
                 if not deterministic_reached and _dr: 
-                    print("[INFO] Deterministic Reached")
+                    if verbose:
+                        print("[INFO] Deterministic Reached")
                 deterministic_reached = deterministic_reached or _dr
            else :
                w_r         = agent_metrics.reward[-hp.insert_patience:]
@@ -384,7 +387,8 @@ def train_reserved_saecollab_tolerance_model(
     hp:GlobalHyperparameters,
     mode_type:LayerModeType,
     mutation_mode:MutationMode,
-    runs:int
+    runs:int,
+    verbose:bool = True
 ):  
     if os.path.exists(save_path):
         return None
@@ -510,7 +514,8 @@ def train_reserved_saecollab_tolerance_model(
 
             if deterministic_reached or (_dr := eval_agent_deterministic(agent, env, hp.max_steps)):
                 if not deterministic_reached and _dr:
-                    print("[INFO] Deterministic Reached")
+                    if verbose:
+                        print("[INFO] Deterministic Reached")
                 deterministic_reached = deterministic_reached or _dr
             else:
                 w_r             = agent_metrics.reward[-hp.insert_patience:]
@@ -671,7 +676,8 @@ def train_baseline_dense_model(
     hp:GlobalHyperparameters,
     mode_type:LayerModeType,
     mutation_mode:MutationMode,
-    runs:int
+    runs:int,
+    verbose:bool = True
 ):
     if os.path.exists(save_path):
         return None
@@ -776,7 +782,8 @@ def train_thread(
         model_arch: ModelArch,
         mode_type: LayerModeType,
         mutation_mode: MutationMode,
-        runs: int
+        runs: int,
+        verbose:bool = True
 ):
         # Create separate environment for this thread
         env = MazeGymWrapper(MazeEnv(maze_path),**state_repr.opts)
@@ -790,13 +797,15 @@ def train_thread(
             hp,
             mode_type,
             mutation_mode,
-            runs
+            runs,
+            verbose
         )
         
         if metrics:
             metrics.save(metrics_path)
         
-        print(f"[{train_tag}] Training Complete")
+        if verbose:
+            print(f"[{train_tag}] Training Complete")
 
         return metrics
 
@@ -1148,6 +1157,7 @@ def fast_experiment_1(dir_path:str=None,
                       max_workers=16,
                       **kwargs):
     from concurrent.futures import ProcessPoolExecutor, as_completed
+    import sys
     
     dir_path = dir_path or 'experiment_1'
     state = AblationProgramState.load_from_json(dir_path,seed)
@@ -1162,101 +1172,57 @@ def fast_experiment_1(dir_path:str=None,
         )
         state.env_update()
 
-    # COMBINATORIAL OPTIONS START
-    
     MAZES = [
         "./mazes/small_eg.maze",
         "./mazes/medium_eg.maze",
         "./mazes/big_eg.maze"
     ]
 
-    # USED BY ENV WRAPPERS 
     STATE_REPRESENTATIONS = [
-        StateRepresentation(
-            state_encoder=StateEncoder.ONE_HOT
-        ),
-        StateRepresentation(
-            state_encoder=StateEncoder.COORDS,
-            possible_actions_feature= True
-        ),
-        StateRepresentation(
-            state_encoder=StateEncoder.COORDS_NORM,
-            num_last_states=2,
-            visited_count=True
-        ),
-        StateRepresentation(
-            state_encoder=StateEncoder.ONE_HOT,
-            possible_actions_feature=True,
-        ),
+        StateRepresentation(state_encoder=StateEncoder.ONE_HOT),
+        StateRepresentation(state_encoder=StateEncoder.COORDS, possible_actions_feature=True),
+        StateRepresentation(state_encoder=StateEncoder.COORDS_NORM, num_last_states=2, visited_count=True),
+        StateRepresentation(state_encoder=StateEncoder.ONE_HOT, possible_actions_feature=True),
     ]
 
-    N_MAX_LAYERS = 4 
-    # GARANTINDO QUE ATE O ULTIMO LAYER TENHAM VARIAÇÕES VALIDAS
-    width_delta  = 1 / (N_MAX_LAYERS)
+    N_MAX_LAYERS = 4
+    width_delta  = 1 / N_MAX_LAYERS
     ARCHITECTURES = [
-        ModelArch(N_MAX_LAYERS,
-                  LayersConfig(1/2,1,1/2),
-                  LayersConfig(width_delta,1,width_delta),
-                  LayersConfig(nn.ReLU,nn.Identity,nn.ReLU),
-                  LayersConfig(True,True,True)
-                  ),
-        ModelArch(N_MAX_LAYERS,
-                  LayersConfig(1/2,1,1/4),
-                  LayersConfig(width_delta,1,width_delta),
-                  LayersConfig(nn.ReLU,nn.Identity,nn.Identity),
-                  LayersConfig(True,True,True)
-                  ),
-
-        ModelArch(N_MAX_LAYERS,
-                  LayersConfig(1/4,1,1/4),
-                  LayersConfig(width_delta,1,width_delta),
-                  LayersConfig(nn.ReLU,nn.Identity,nn.Identity),
-                  LayersConfig(False,True,False)
-                  ),
-
-        ModelArch(N_MAX_LAYERS,
-                  LayersConfig(1/4,1,1/2),
-                  LayersConfig(width_delta,1,width_delta),
-                  LayersConfig(nn.ReLU,nn.Identity,nn.ReLU),
-                  LayersConfig(False,True,False)
-                  ),
+        ModelArch(N_MAX_LAYERS, LayersConfig(1/2,1,1/2), LayersConfig(width_delta,1,width_delta), LayersConfig(nn.ReLU,nn.Identity,nn.ReLU),  LayersConfig(True,True,True)),
+        ModelArch(N_MAX_LAYERS, LayersConfig(1/2,1,1/4), LayersConfig(width_delta,1,width_delta), LayersConfig(nn.ReLU,nn.Identity,nn.Identity), LayersConfig(True,True,True)),
+        ModelArch(N_MAX_LAYERS, LayersConfig(1/4,1,1/4), LayersConfig(width_delta,1,width_delta), LayersConfig(nn.ReLU,nn.Identity,nn.Identity), LayersConfig(False,True,False)),
+        ModelArch(N_MAX_LAYERS, LayersConfig(1/4,1,1/2), LayersConfig(width_delta,1,width_delta), LayersConfig(nn.ReLU,nn.Identity,nn.ReLU),  LayersConfig(False,True,False)),
     ]
 
     INSERTION_TYPES = list(LayerInsertionType)
     LAYER_MODES     = list(LayerModeType)[::-1]
     MUTATION_MODES  = list(MutationMode)
 
-    # VALIDA PARA O MODO TABULAR TAMBEM
     runs = 1
 
     COMB_ARRAYS_LIST = [MAZES, STATE_REPRESENTATIONS, ARCHITECTURES, INSERTION_TYPES, LAYER_MODES, MUTATION_MODES]
     DIMENSIONS = [len(arr) for arr in COMB_ARRAYS_LIST]
-    TOTAL_EXPERIMENT_ITERS = reduce(lambda x,y : x * y, DIMENSIONS)
-    
-    # Get starting indices for resuming
+    TOTAL_EXPERIMENT_ITERS = reduce(lambda x,y: x * y, DIMENSIONS)
+
     skip_indices = state.get_skip_indices(DIMENSIONS)
     print(f"[INFO] Starting from indices: {skip_indices}")
     print(f"[INFO] Completed iterations: {state.completed_iteration + 1}/{TOTAL_EXPERIMENT_ITERS}")
-
-    # COMBINATORIAL OPTIONS END    
 
     all_jobs = []
 
     for maze_idx, maze_path in enumerate(MAZES):
         maze_env = MazeEnv(maze_path, rewards_scaled=False, pass_through_walls=False)
 
-        # GLOBAL HYPERPARAMETERS
         EPISODES  = 400
         MAX_STEPS = maze_env.rows * maze_env.cols * len(list(Action))
-        # MAX_STEPS = maze_env.opens_count * len(list(Action))
-        
+
         epsilon_decay = exp_decay_factor_to(
-                final_epsilon=0.1,
-                final_step=MAX_STEPS * EPISODES,
-                epsilon_start=1.0,
-                convergence_threshold=0.01
+            final_epsilon=0.1,
+            final_step=MAX_STEPS * EPISODES,
+            epsilon_start=1.0,
+            convergence_threshold=0.01
         )
-        
+
         hyperparameters = GlobalHyperparameters(
             learning_rate           = 1e-5,
             new_layer_learning_rate = 5e-5,
@@ -1272,19 +1238,17 @@ def fast_experiment_1(dir_path:str=None,
             insert_min_variance     = 0.6
         )
 
-        # TRAIN TABULAR MODEL
         try:
-            state.train_tabular_agent(maze_path,hyperparameters,runs)
+            state.train_tabular_agent(maze_path, hyperparameters, runs)
         except Exception as e:
             print(f"[WARNING] Cant Train Tabular Agent: {e}")
         state.save_a_star_qtable(maze_path)
-        
+
         for state_representation in STATE_REPRESENTATIONS:
             for arch in ARCHITECTURES:
                 for insertion_type in INSERTION_TYPES:
                     for layer_mode in LAYER_MODES:
                         for mutation_mode in MUTATION_MODES:
-
                             gym_env = MazeGymWrapper(maze_env, **state_representation.opts)
                             base_width = gym_env.action_size * maze_env.rows * maze_env.cols
                             concrete_arch = gen_concrete_arch(base_width, gym_env, arch, insertion_type)
@@ -1322,25 +1286,122 @@ def fast_experiment_1(dir_path:str=None,
                                         "model_arch"   : arch,
                                         "mode_type"    : layer_mode.tag,
                                         "mutation_mode": mutation_mode,
-                                        "runs"         : 1
+                                        "runs"         : 1,
+                                        "verbose"      : False
                                     })
 
-    total = len(all_jobs)
-    done  = 0
-    print(f"[INFO] Total jobs: {total}")
+    total      = len(all_jobs)
+    done       = 0
+    errors     = 0
+    start_time = time.time()
+
+    # ── rolling window for per-job timing ──────────────────────────────────
+    WINDOW      = 50          # use last N completions to estimate speed
+    finish_times: deque = deque(maxlen=WINDOW)   # timestamps of recent completions
+
+    def fmt_time(t: float) -> str:
+        h = int(t // 3600)
+        m = int((t % 3600) // 60)
+        s = int(t % 60)
+        if h:
+            return f"{h}h {m:02d}m {s:02d}s"
+        if m:
+            return f"{m}m {s:02d}s"
+        return f"{s}s"
+
+    def print_progress(job: dict, job_elapsed: float, error: Exception | None = None):
+        """
+        Prints a compact, always-visible block every time a job finishes.
+        No cursor tricks — just a clean timestamped line + summary every N jobs.
+        """
+        nonlocal done, errors
+
+        now        = time.time()
+        wall_clock = now - start_time
+        finish_times.append(now)
+
+        # ETA from rolling window
+        if len(finish_times) >= 2:
+            window_span   = finish_times[-1] - finish_times[0]
+            rate          = (len(finish_times) - 1) / window_span   # jobs/sec
+            remaining     = total - done
+            eta_seconds   = remaining / rate if rate > 0 else 0
+            eta_str       = fmt_time(eta_seconds)
+            rate_str      = f"{rate * 60:.1f} jobs/min"
+        else:
+            eta_str  = "calculating..."
+            rate_str = "—"
+
+        # Progress bar (40 chars)
+        pct        = done / total
+        bar_filled = int(40 * pct)
+        bar        = "█" * bar_filled + "░" * (40 - bar_filled)
+
+        # Short job label: just the last 3 path components + model type
+        parts      = job["model_path"].replace("\\", "/").split("/")
+        short_path = "/".join(parts[-4:]) if len(parts) >= 4 else job["model_path"]
+
+        status = "✓" if error is None else "✗"
+        err_info = f"  ⚠ {type(error).__name__}: {str(error)[:80]}" if error else ""
+
+        # Always print the per-job line
+        timestamp = time.strftime("%H:%M:%S")
+        print(
+            f"[{timestamp}] {status} [{done:>4}/{total}] "
+            f"({pct*100:5.1f}%) | job took {fmt_time(job_elapsed):<8} | "
+            f"ETA {eta_str} @ {rate_str}"
+        )
+        if err_info:
+            print(err_info)
+
+        # Every 10 jobs (or first, or last) print a full summary block
+        if done == 1 or done % 10 == 0 or done == total:
+            sep = "─" * 72
+            print(sep)
+            print(
+                f"  SUMMARY  |  Done: {done}/{total}  |  Errors: {errors}  |  "
+                f"Workers: {max_workers}  |  Wall: {fmt_time(wall_clock)}"
+            )
+            print(f"  Progress: [{bar}] {pct*100:.1f}%")
+            print(f"  ETA: {eta_str}  |  Speed: {rate_str}")
+            print(f"  Last job: {short_path}")
+            print(sep)
+
+        sys.stdout.flush()
+
+    print(f"\n[INFO] Total jobs to run : {total}")
+    print(f"[INFO] Workers           : {max_workers}")
+    print(f"[INFO] Starting at       : {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 72)
 
     with ProcessPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(train_thread, **job): job for job in all_jobs}
+        # tag each future with its submission timestamp
+        futures = {}
+        for job in all_jobs:
+            f = pool.submit(train_thread, **job)
+            futures[f] = (job, time.time())   # store job + submit time
+
         for future in as_completed(futures):
+            job, submit_time = futures[future]
+            job_elapsed = time.time() - submit_time
             done += 1
-            print(f"[{done}/{total}] done", end="\r")
+            error = None
             try:
                 future.result()
             except Exception as e:
-                print(f"\n[ERROR] {futures[future]['model_path']}: {e}")
+                error = e
+                errors += 1
 
-    print(f"\n[INFO] All {total} jobs complete")
+            print_progress(job, job_elapsed, error)
 
-
+    total_time = time.time() - start_time
+    print("\n" + "=" * 72)
+    print(f"  ALL JOBS COMPLETE")
+    print(f"  Total jobs : {total}")
+    print(f"  Successful : {total - errors}")
+    print(f"  Errors     : {errors}")
+    print(f"  Wall time  : {fmt_time(total_time)}")
+    print(f"  Avg/job    : {fmt_time(total_time / total) if total else '—'}")
+    print("=" * 72)
 
 SELECTABLE_EXPERIMENTS = [experiment_1,fast_experiment_1] 
