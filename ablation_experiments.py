@@ -1290,7 +1290,9 @@ def fast_experiment_1(dir_path:str=None,
                                         "verbose"      : False
                                     })
 
-    total      = len(all_jobs)
+    total_possible = TOTAL_EXPERIMENT_ITERS * 2  # 2 modelos por iteração (sae + dense)
+    already_done   = total_possible - total       # jobs que já existiam em disco
+    total          = len(all_jobs)
     done       = 0
     errors     = 0
     start_time = time.time()
@@ -1333,7 +1335,10 @@ def fast_experiment_1(dir_path:str=None,
             rate_str = "—"
 
         # Progress bar (40 chars)
-        pct        = done / total
+        global_done = already_done + done
+        pct         = global_done / total_possible
+        bar_filled  = int(40 * pct)
+        bar         = "█" * bar_filled + "░" * (40 - bar_filled)
         bar_filled = int(40 * pct)
         bar        = "█" * bar_filled + "░" * (40 - bar_filled)
 
@@ -1347,7 +1352,7 @@ def fast_experiment_1(dir_path:str=None,
         # Always print the per-job line
         timestamp = time.strftime("%H:%M:%S")
         print(
-            f"[{timestamp}] {status} [{done:>4}/{total}] "
+            f"[{timestamp}] {status} [{global_done:>4}/{total_possible}] "
             f"({pct*100:5.1f}%) | job took {fmt_time(job_elapsed):<8} | "
             f"ETA {eta_str} @ {rate_str}"
         )
@@ -1358,10 +1363,7 @@ def fast_experiment_1(dir_path:str=None,
         if done == 1 or done % 10 == 0 or done == total:
             sep = "─" * 72
             print(sep)
-            print(
-                f"  SUMMARY  |  Done: {done}/{total}  |  Errors: {errors}  |  "
-                f"Workers: {max_workers}  |  Wall: {fmt_time(wall_clock)}"
-            )
+            print(f"  SUMMARY  |  Done: {global_done}/{total_possible}  (this session: {done}/{total})  |  ...")
             print(f"  Progress: [{bar}] {pct*100:.1f}%")
             print(f"  ETA: {eta_str}  |  Speed: {rate_str}")
             print(f"  Last job: {short_path}")
