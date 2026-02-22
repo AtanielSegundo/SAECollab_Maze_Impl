@@ -1291,8 +1291,8 @@ def fast_experiment_1(dir_path:str=None,
                                     })
 
     total_possible = TOTAL_EXPERIMENT_ITERS * 2  # 2 modelos por iteração (sae + dense)
-    already_done   = total_possible - total       # jobs que já existiam em disco
     total          = len(all_jobs)
+    already_done   = total_possible - total       # jobs que já existiam em disco
     done       = 0
     errors     = 0
     start_time = time.time()
