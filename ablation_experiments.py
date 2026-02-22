@@ -1154,7 +1154,7 @@ def experiment_1(dir_path:str=None,
 def fast_experiment_1(dir_path:str=None,
                       seed=None,
                       TABULAR_QLEARNING_PATH = "./c_qlearning/build/agentTrain.exe",
-                      max_workers=16,
+                      max_workers=16 // 2,
                       **kwargs):
     from concurrent.futures import ProcessPoolExecutor, as_completed
     import sys
