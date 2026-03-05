@@ -451,7 +451,7 @@ def plot_compiled_metrics(
         plt.show()
     return fig
 
-def ablation_traverse(search_base, search_targets, search_filters, plot_save_path):
+def ablation_traverse(search_base, search_targets, search_filters, plot_save_path, x_max = 400):
     search_result = traversal_search(search_base, search_targets, search_filters)
 
     target_metrics_keys = list(ModelTrainMetrics().available_metrics)
@@ -463,21 +463,25 @@ def ablation_traverse(search_base, search_targets, search_filters, plot_save_pat
 
     compile_all_metrics(search_result, compiled_metrics)
     
-    all_baselines_compiled = CompiledTrainMetrics(target_metrics_keys)
-    for f_key,compiled_metrics_d in compiled_metrics.items():
-        all_baselines_compiled.extend(compiled_metrics_d['baseline'])
+    use_baseline = 'baseline' in search_targets.keys()
+    if use_baseline:
+        all_baselines_compiled = CompiledTrainMetrics(target_metrics_keys)
+        for f_key,compiled_metrics_d in compiled_metrics.items():
+            all_baselines_compiled.extend(compiled_metrics_d['baseline'])
         
+    x_lim_max = len(all_baselines_compiled.comp_metrics[target_metrics_keys[0]]) if use_baseline else x_max
+    x_lim_max = x_lim_max - 1
     plot_compiled_metrics(
         compiled_metrics,
         f_keys=list(search_filters.keys()),
         target='sae',
-        metrics_to_plot=None,
+        metrics_to_plot=None,   
         smooth_window=10,
-        extra_metrics={"baseline": all_baselines_compiled},
+        extra_metrics={"baseline": all_baselines_compiled} if use_baseline else None,
         out_file=plot_save_path,
         show=True,
         title=os.path.basename(plot_save_path).split(".")[0].upper().replace("_"," "),
-        x_lim = (1,len(all_baselines_compiled.comp_metrics[target_metrics_keys[0]])-1)
+        x_lim = (1,x_lim_max)
     )
 
     return compiled_metrics, search_result
@@ -563,8 +567,8 @@ def main(*args, **kwargs):
     ablation_traverse(search_base,search_targets,search_filters,out_file)
 
     search_filters = {
-        "COORDS": SearchFilter("COORDS"),
-        "ONE_HOT": SearchFilter("ONE_HOT"),
+        "COORDS": SearchFilter("COORDS","COORDS_NORM_nls_2_vcnt"),
+        "ONE_HOT": SearchFilter("ONE_HOT","ONE_HOT_paf"),
     }
     out_file = 'plots/compared_encodes.png'
     ablation_traverse(search_base,search_targets,search_filters,out_file)

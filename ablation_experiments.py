@@ -260,7 +260,7 @@ def train_saecollab_tolerance_model(
         min_replay_size=max(1000,2*hp.batch_size),
         use_bias=model_arch.use_bias
     )
-
+    #agent.compile()
     parameters_cnt = sum(p.numel() for p in agent.policy_net.parameters())
     agent_metrics  = ModelTrainMetrics()
     cum_goals      = 0
@@ -449,7 +449,7 @@ def train_reserved_saecollab_tolerance_model(
         min_replay_size       = max(1000, 2 * hp.batch_size),
         use_bias              = model_arch.use_bias
     )
-
+    #agent.compile()
     parameters_cnt = sum(
         p.numel() 
         for layer in agent.policy_net.layers[:agent.policy_net.active_head + 1]
@@ -712,6 +712,7 @@ def train_baseline_dense_model(
         learn_interval=hp.steps_learn_interval,
         min_replay_size=max(1000,2*hp.batch_size),
     )
+    #agent.compile()
     parameters_cnt = sum(p.numel() for p in agent.policy_net.parameters())
     
     agent_metrics = ModelTrainMetrics()
@@ -774,7 +775,7 @@ def train_thread(
         maze_path:str,
         model_path:str,
         metrics_path:str,
-        train_fn:Callable,
+        train_fn:str,
         train_tag:str,
         hp: GlobalHyperparameters,
         state_repr: StateRepresentation,
@@ -785,11 +786,19 @@ def train_thread(
         runs: int,
         verbose:bool = True
 ):
+        _FN_REGISTRY = {
+            "train_reserved_saecollab_tolerance_model": train_reserved_saecollab_tolerance_model,
+            "train_baseline_dense_model":               train_baseline_dense_model,
+            "train_saecollab_tolerance_model":          train_saecollab_tolerance_model,
+        }
+
+        fn = _FN_REGISTRY[train_fn]
+        
         # Create separate environment for this thread
         env = MazeGymWrapper(MazeEnv(maze_path),**state_repr.opts)
         mode_type = LayerModeType.from_tag(mode_type)
 
-        metrics = train_fn(
+        metrics = fn(
             model_path,
             env,
             model_arch,
@@ -892,7 +901,7 @@ def train_models(
         for target in train_targets:
             args["model_path"]   = target.save_model_path
             args["metrics_path"] = target.save_metrics_path
-            args["train_fn"]     = target.fn
+            args["train_fn"]     = target.fn.__name__
             args["train_tag"]    = target.tag
 
             train_thread(**args)
@@ -904,7 +913,7 @@ def train_models(
         for target in train_targets:
             args["model_path"]   = target.save_model_path
             args["metrics_path"] = target.save_metrics_path
-            args["train_fn"]     = target.fn
+            args["train_fn"]     = target.fn.__name__
             args["train_tag"]    = target.tag
 
             p = multiprocessing.Process(target=train_thread,kwargs=args)
@@ -923,7 +932,7 @@ def train_models(
         for target in train_targets:
             args["model_path"]   = target.save_model_path
             args["metrics_path"] = target.save_metrics_path
-            args["train_fn"]     = target.fn
+            args["train_fn"]     = target.fn.__name__
             args["train_tag"]    = target.tag
 
             p = threading.Thread(target=train_thread,name=target.tag,kwargs=args)
@@ -1154,7 +1163,7 @@ def experiment_1(dir_path:str=None,
 def fast_experiment_1(dir_path:str=None,
                       seed=None,
                       TABULAR_QLEARNING_PATH = "./c_qlearning/build/agentTrain.exe",
-                      max_workers=16 // 2,
+                      max_workers=12,
                       **kwargs):
     from concurrent.futures import ProcessPoolExecutor, as_completed
     import sys
@@ -1278,7 +1287,7 @@ def fast_experiment_1(dir_path:str=None,
                                         "maze_path"    : maze_path,
                                         "model_path"   : model_path,
                                         "metrics_path" : metrics_path,
-                                        "train_fn"     : train_fn,
+                                        "train_fn"     : train_fn.__name__,
                                         "train_tag"    : subdir,
                                         "hp"           : hyperparameters,
                                         "state_repr"   : state_representation,
