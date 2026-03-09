@@ -22,10 +22,10 @@ class ReplayBuffer:
 
     def push(self, state, action, reward, next_state, done):
         self.buffer.append(Transition(
-            torch.as_tensor(state, dtype=torch.float32).reshape(-1),  # flatten → (state_size,)
+            np.asarray(state, dtype=np.float32).reshape(-1),
             action,
             float(reward),
-            torch.as_tensor(next_state, dtype=torch.float32).reshape(-1),  # flatten → (state_size,)
+            np.asarray(next_state, dtype=np.float32).reshape(-1),
             bool(done)
         ))
 
@@ -52,7 +52,7 @@ def exp_decay_factor_to(final_epsilon: float,
     
     Args:
         final_epsilon: Valor desejado de epsilon no step final (ex: 0.01)
-        final_step: Número do step onde epsilon deve atingir final_epsilon (ex: 5000)
+        final_step: Número do step onde epsilon deve atingir final_epsilon  (ex: 5000)
         epsilon_start: Valor inicial de epsilon (padrão: 1.0)
         convergence_threshold: Quão próximo de final_epsilon queremos chegar.
                               0.01 = chega a 99% do caminho (padrão)
@@ -182,16 +182,18 @@ class TorchDDQN:
         self.epsilon = self.epsilon_final + (self.epsilon_start - self.epsilon_final) * \
                        np.exp(-self.steps_done / self.epsilon_decay)
 
-    def act(self, state: np.ndarray, eval: bool = False) -> int:
+    def act(self, state, eval: bool = False) -> int:
         if not eval:
             self.steps_done += 1
 
-        eps = 0.0 if eval else self.epsilon
-        if (not eval) and rand.random() < eps:
+        if not eval and rand.random() < self.epsilon:
             return rand.randrange(self.action_size)
 
         with torch.no_grad():
-            s = torch.from_numpy(np.asarray(state, dtype=np.float32)).to(self.device, non_blocking=True)
+            if isinstance(state, torch.Tensor):
+                s = state if state.device == self.device else state.to(self.device, non_blocking=True)
+            else:
+                s = torch.from_numpy(np.asarray(state, dtype=np.float32)).to(self.device, non_blocking=True)
             if s.ndim == 1:
                 s = s.unsqueeze(0)
             q = self.policy_net(s)
@@ -209,9 +211,8 @@ class TorchDDQN:
 
         batch = self.replay.sample(self.batch_size)
 
-        # === OTIMIZAÇÃO GPU: torch.stack + non_blocking ===
-        states_t = torch.stack(batch.state).to(self.device, non_blocking=True)
-        next_states_t = torch.stack(batch.next_state).to(self.device, non_blocking=True)
+        states_t      = torch.from_numpy(np.stack(batch.state)).to(self.device, non_blocking=True)
+        next_states_t = torch.from_numpy(np.stack(batch.next_state)).to(self.device, non_blocking=True)
 
         actions = np.array(batch.action, dtype=np.int64)
         rewards = np.array(batch.reward, dtype=np.float32)
@@ -357,17 +358,23 @@ class SAECollabDDQN:
         self.epsilon = self.epsilon_final + (self.epsilon_start - self.epsilon_final) * \
                        np.exp(-self.steps_done / self.epsilon_decay)
 
-    def act(self, state: np.ndarray, eval: bool = False) -> int:
+    def act(self, state, eval: bool = False) -> int:
         if not eval:
             self.steps_done += 1
-        eps = 0.0 if eval else self.epsilon
-        if (not eval) and rand.random() < eps:
+        
+        if not eval and rand.random() < self.epsilon:
             return rand.randrange(self.action_size)
 
         with torch.no_grad():
-            s = torch.from_numpy(np.asarray(state, dtype=np.float32)).to(self.device, non_blocking=True)
+            # Skip allocation if already a GPU tensor
+            if isinstance(state, torch.Tensor):
+                s = state if state.device == self.device else state.to(self.device, non_blocking=True)
+            else:
+                s = torch.from_numpy(np.asarray(state, dtype=np.float32)).to(self.device, non_blocking=True)
+            
             if s.ndim == 1:
                 s = s.unsqueeze(0)
+            
             q, _, _ = self.policy_net(s)
             return int(torch.argmax(q, dim=1).item())
 
@@ -411,8 +418,8 @@ class SAECollabDDQN:
 
         batch = self.replay.sample(self.batch_size)
 
-        states_t = torch.stack(batch.state).to(self.device, non_blocking=True)
-        next_states_t = torch.stack(batch.next_state).to(self.device, non_blocking=True)
+        states_t      = torch.from_numpy(np.stack(batch.state)).to(self.device, non_blocking=True)
+        next_states_t = torch.from_numpy(np.stack(batch.next_state)).to(self.device, non_blocking=True)
 
         actions = np.array(batch.action, dtype=np.int64)
         rewards = np.array(batch.reward, dtype=np.float32)
@@ -590,17 +597,23 @@ class ReservedSAECollabDDQN:
         self.epsilon = self.epsilon_final + (self.epsilon_start - self.epsilon_final) * \
                        np.exp(-self.steps_done / self.epsilon_decay)
 
-    def act(self, state: np.ndarray, eval: bool = False) -> int:
+    def act(self, state, eval: bool = False) -> int:
         if not eval:
             self.steps_done += 1
-        eps = 0.0 if eval else self.epsilon
-        if (not eval) and rand.random() < eps:
+        
+        if not eval and rand.random() < self.epsilon:
             return rand.randrange(self.action_size)
 
         with torch.no_grad():
-            s = torch.from_numpy(np.asarray(state, dtype=np.float32)).to(self.device, non_blocking=True)
+            # Skip allocation if already a GPU tensor
+            if isinstance(state, torch.Tensor):
+                s = state if state.device == self.device else state.to(self.device, non_blocking=True)
+            else:
+                s = torch.from_numpy(np.asarray(state, dtype=np.float32)).to(self.device, non_blocking=True)
+            
             if s.ndim == 1:
                 s = s.unsqueeze(0)
+            
             q, _, _ = self.policy_net(s)
             return int(torch.argmax(q, dim=1).item())
 
@@ -622,9 +635,9 @@ class ReservedSAECollabDDQN:
 
         batch = self.replay.sample(self.batch_size)
 
-        states_t = torch.stack(batch.state).to(self.device, non_blocking=True)
-        next_states_t = torch.stack(batch.next_state).to(self.device, non_blocking=True)
-
+        states_t     = torch.from_numpy(np.stack(batch.state)).to(self.device, non_blocking=True)
+        next_states_t = torch.from_numpy(np.stack(batch.next_state)).to(self.device, non_blocking=True)
+        
         actions = np.array(batch.action, dtype=np.int64)
         rewards = np.array(batch.reward, dtype=np.float32)
         dones = np.array(batch.done, dtype=np.uint8)

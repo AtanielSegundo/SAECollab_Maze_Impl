@@ -1,5 +1,3 @@
-# Combined MazeEnv and MazeGymWrapper with `pass_through_walls` option
-
 import numpy as np
 import os
 

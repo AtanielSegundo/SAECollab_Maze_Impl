@@ -13,6 +13,7 @@ from models.QModels import exp_decay_factor_to,TorchDDQN, \
 
 from env.MazeEnv import MazeEnv
 from env.MazeWrapper import StateEncoder, MazeGymWrapper
+from env.GPUMazeWrapper import GPUMazeWrapper
 
 from functools import reduce
 from collections import deque
@@ -198,29 +199,34 @@ def save_concrete_arch_info(save_dir:str,concrete_arch:List[LayersConfig]):
         json.dump(concrete_arch_repr,f,indent=4)
 
 def eval_agent_deterministic(agent, env, max_steps):
-    """Avalia se agente consegue alcançar goal deterministicamente"""
-    old_epsilon = getattr(agent, "epsilon", None)
+    old_epsilon   = getattr(agent, "epsilon", None)
     prev_training = getattr(agent.policy_net, "training", True)
-    agent.policy_net.eval
-    
+    agent.policy_net.eval()
+
     if hasattr(agent, "epsilon"):
         agent.epsilon = 0.0
 
-    ns = env.reset()
-    state = ns.reshape(1, -1)
-    reached = False
+    state = env.reset()
+    # GPUMazeWrapper.reset() returns (1, state_size) GPU tensor
+    # MazeGymWrapper.reset()  returns (state_size,) numpy  — kept for compat
+    if not isinstance(state, torch.Tensor):
+        state = torch.from_numpy(
+            np.asarray(state, dtype=np.float32)
+        ).unsqueeze(0).to(agent.device)
 
+    reached = False
     with torch.no_grad():
         for _ in range(max_steps):
-            try:
-                action = agent.act(state, eval=True)
-            except TypeError:
-                action = agent.act(state)
-            next_state, reward, done, extras = env.step(action)
+            action                   = agent.act(state, eval=True)
+            next_state, _, done, extras = env.step(action)
             if env.isGoal(extras.get("raw_ns", extras)):
                 reached = True
                 break
-            state = next_state.reshape(1, -1)
+            if not isinstance(next_state, torch.Tensor):
+                next_state = torch.from_numpy(
+                    np.asarray(next_state, dtype=np.float32)
+                ).unsqueeze(0).to(agent.device)
+            state = next_state
             if done:
                 break
 
@@ -270,25 +276,31 @@ def train_saecollab_tolerance_model(
     episodes_since_last_branch = 0
     # Check if the goal at least once was reached
     goal_once_reached = False
+
     for episode in range(hp.episodes):
-        epoch_start_time = datetime.now()
+        epoch_start_time = time.perf_counter()
         cum_reward = 0.0
         cum_steps  = 0
-        state = env.reset()
-        state = state.reshape(1,-1)
-        
+
+        state_gpu = env.reset()               # (1, state_size) on GPU — zero transfer
+        state_np  = env.last_state_np         # (state_size,)   on CPU — zero GPU sync
+
         for step in range(hp.max_steps):
-            action = agent.act(state, eval=False)
-            next_state, reward, done, extras_dict = env.step(action)
-            if env.isGoal(extras_dict["raw_ns"]):
+            action                          = agent.act(state_gpu, eval=False)
+            next_gpu, reward, done, extras  = env.step(action)
+
+            if env.isGoal(extras["raw_ns"]):
                 goal_reached[episode] = True
-                goal_once_reached = True
-                cum_goals += 1
-            next_state = next_state.reshape(1,-1)
-            agent.remember(state, action, reward, next_state, done)
-            state = next_state
+                goal_once_reached     = True
+                cum_goals            += 1
+
+            next_np = env.last_state_np       # CPU — zero GPU sync
+            agent.remember(state_np, action, reward, next_np, done)
+
+            state_gpu = next_gpu              # GPU tensor — zero transfer
+            state_np  = next_np               # reuse; no recomputation next iter
             cum_reward += reward
-            cum_steps = step
+            cum_steps   = step
             if done:
                 break
         
@@ -363,8 +375,7 @@ def train_saecollab_tolerance_model(
                    parameters_cnt = sum(p.numel() for p in agent.policy_net.parameters())
                    episodes_since_last_branch = 0
         # End
-        epoch_end_time = datetime.now()
-        delta_time = (epoch_end_time - epoch_start_time).total_seconds()
+        delta_time = time.perf_counter() - epoch_start_time
         agent_metrics.append(episode,cum_reward,cum_goals,success_rate,
                              loss_val,cum_steps,parameters_cnt,
                              delta_time,current_branch
@@ -464,22 +475,27 @@ def train_reserved_saecollab_tolerance_model(
     goal_once_reached          = False
 
     for episode in range(hp.episodes):
-        epoch_start_time = datetime.now()
+        epoch_start_time = time.perf_counter()
         cum_reward = 0.0
         cum_steps  = 0
-        state = env.reset()
-        state = state.reshape(1, -1)
+
+        state_gpu = env.reset()               # (1, state_size) on GPU — zero transfer
+        state_np  = env.last_state_np         # (state_size,)   on CPU — zero GPU sync
 
         for step in range(hp.max_steps):
-            action = agent.act(state, eval=False)
-            next_state, reward, done, extras_dict = env.step(action)
-            if env.isGoal(extras_dict["raw_ns"]):
+            action                          = agent.act(state_gpu, eval=False)
+            next_gpu, reward, done, extras  = env.step(action)
+
+            if env.isGoal(extras["raw_ns"]):
                 goal_reached[episode] = True
                 goal_once_reached     = True
-                cum_goals            += 1
-            next_state = next_state.reshape(1, -1)
-            agent.remember(state, action, reward, next_state, done)
-            state      = next_state
+                cum_goals             += 1
+
+            next_np = env.last_state_np       # CPU — zero GPU sync
+            agent.remember(state_np, action, reward, next_np, done)
+
+            state_gpu = next_gpu              # GPU tensor — zero transfer
+            state_np  = next_np               # reuse; no recomputation next iter
             cum_reward += reward
             cum_steps   = step
             if done:
@@ -543,8 +559,7 @@ def train_reserved_saecollab_tolerance_model(
                     )
                     episodes_since_last_branch = 0
 
-        epoch_end_time = datetime.now()
-        delta_time     = (epoch_end_time - epoch_start_time).total_seconds()
+        delta_time = time.perf_counter() - epoch_start_time
         agent_metrics.append(episode, cum_reward, cum_goals, success_rate,
                              loss_val, cum_steps, parameters_cnt,
                              delta_time, current_branch)
@@ -720,22 +735,28 @@ def train_baseline_dense_model(
     goal_reached  = np.zeros((hp.episodes),dtype=bool) 
     
     for episode in range(hp.episodes):
-        epoch_start_time = datetime.now()
+        epoch_start_time = time.perf_counter()
         cum_reward = 0.0
         cum_steps  = 0
-        state = env.reset()
-        state = state.reshape(1,-1)
+
+        state_gpu = env.reset()               # (1, state_size) on GPU — zero transfer
+        state_np  = env.last_state_np         # (state_size,)   on CPU — zero GPU sync
+
         for step in range(hp.max_steps):
-            action = agent.act(state, eval=False)
-            next_state, reward, done, extras_dict = env.step(action)
-            if env.isGoal(extras_dict["raw_ns"]):
+            action                          = agent.act(state_gpu, eval=False)
+            next_gpu, reward, done, extras  = env.step(action)
+
+            if env.isGoal(extras["raw_ns"]):
                 goal_reached[episode] = True
-                cum_goals += 1
-            next_state = next_state.reshape(1,-1)
-            agent.remember(state, action, reward, next_state, done)
-            state = next_state
+                cum_goals            += 1
+
+            next_np = env.last_state_np       # CPU — zero GPU sync
+            agent.remember(state_np, action, reward, next_np, done)
+
+            state_gpu = next_gpu              # GPU tensor — zero transfer
+            state_np  = next_np               # reuse; no recomputation next iter
             cum_reward += reward
-            cum_steps = step 
+            cum_steps   = step
             if done:
                 break
         
@@ -758,8 +779,7 @@ def train_baseline_dense_model(
             recent_goals = int(np.sum(recent_window))
             success_rate = (recent_goals / hp.rolling_window_size) * 100
 
-        epoch_end_time = datetime.now()
-        delta_time = (epoch_end_time - epoch_start_time).total_seconds()
+        delta_time = time.perf_counter() - epoch_start_time
         agent_metrics.append(episode,cum_reward,cum_goals,
                              success_rate,loss_val,cum_steps,
                              parameters_cnt,delta_time,model_arch.max_layers)
@@ -772,51 +792,49 @@ def train_baseline_dense_model(
     return agent_metrics
 
 def train_thread(
-        maze_path:str,
-        model_path:str,
-        metrics_path:str,
-        train_fn:str,
-        train_tag:str,
-        hp: GlobalHyperparameters,
-        state_repr: StateRepresentation,
+        maze_path:    str,
+        model_path:   str,
+        metrics_path: str,
+        train_fn:     str,
+        train_tag:    str,
+        hp:           GlobalHyperparameters,
+        state_repr:   StateRepresentation,
         concrete_arch: List[LayersConfig],
-        model_arch: ModelArch,
-        mode_type: LayerModeType,
+        model_arch:   ModelArch,
+        mode_type:    LayerModeType,
         mutation_mode: MutationMode,
-        runs: int,
-        verbose:bool = True
+        runs:         int,
+        verbose:      bool = True
 ):
-        _FN_REGISTRY = {
-            "train_reserved_saecollab_tolerance_model": train_reserved_saecollab_tolerance_model,
-            "train_baseline_dense_model":               train_baseline_dense_model,
-            "train_saecollab_tolerance_model":          train_saecollab_tolerance_model,
-        }
+    _FN_REGISTRY = {
+        "train_reserved_saecollab_tolerance_model": train_reserved_saecollab_tolerance_model,
+        "train_baseline_dense_model":               train_baseline_dense_model,
+        "train_saecollab_tolerance_model":          train_saecollab_tolerance_model,
+    }
 
-        fn = _FN_REGISTRY[train_fn]
-        
-        # Create separate environment for this thread
-        env = MazeGymWrapper(MazeEnv(maze_path),**state_repr.opts)
-        mode_type = LayerModeType.from_tag(mode_type)
+    fn        = _FN_REGISTRY[train_fn]
+    mode_type = LayerModeType.from_tag(mode_type)
+    device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        metrics = fn(
-            model_path,
-            env,
-            model_arch,
-            concrete_arch,
-            hp,
-            mode_type,
-            mutation_mode,
-            runs,
-            verbose
-        )
-        
-        if metrics:
-            metrics.save(metrics_path)
-        
-        if verbose:
-            print(f"[{train_tag}] Training Complete")
+    # ── Build GPU-resident environment ────────────────────────────────────
+    env = GPUMazeWrapper(
+        MazeEnv(maze_path),
+        device=device,
+        **state_repr.opts          # same dict as MazeGymWrapper accepted
+    )
 
-        return metrics
+    metrics = fn(
+        model_path, env, model_arch, concrete_arch,
+        hp, mode_type, mutation_mode, runs, verbose
+    )
+
+    if metrics:
+        metrics.save(metrics_path)
+
+    if verbose:
+        print(f"[{train_tag}] Training Complete")
+
+    return metrics
 
 def train_models(
     state: AblationProgramState,
@@ -1163,7 +1181,7 @@ def experiment_1(dir_path:str=None,
 def fast_experiment_1(dir_path:str=None,
                       seed=None,
                       TABULAR_QLEARNING_PATH = "./c_qlearning/build/agentTrain.exe",
-                      max_workers=12,
+                      max_workers=8,
                       **kwargs):
     from concurrent.futures import ProcessPoolExecutor, as_completed
     import sys
