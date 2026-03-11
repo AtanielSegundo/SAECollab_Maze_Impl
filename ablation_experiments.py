@@ -117,8 +117,12 @@ def gen_concrete_arch(
     base_width    : int,
     env           : MazeGymWrapper,
     architecute   : ModelArch,
-    insertion_type: LayerInsertionType
+    insertion_type: LayerInsertionType,
+    min_width     : int = 64,
+    max_width     : int = 2048,
 ) -> Optional[List[LayersConfig]]:
+
+    base_width = max(min_width, min(max_width, base_width))
     
     if insertion_type is LayerInsertionType.CNT:
         cnt_hidden = architecute.width_multipliers.hidden * base_width
@@ -1297,8 +1301,8 @@ def fast_experiment_1(dir_path:str=None,
                 for insertion_type in INSERTION_TYPES:
                     for layer_mode in LAYER_MODES:
                         for mutation_mode in MUTATION_MODES:
-                            gym_env = MazeGymWrapper(maze_env, **state_representation.opts)
-                            base_width = gym_env.action_size * maze_env.rows * maze_env.cols
+                            gym_env       = MazeGymWrapper(maze_env, **state_representation.opts)
+                            base_width    = gym_env.action_size * maze_env.rows * maze_env.cols
                             concrete_arch = gen_concrete_arch(base_width, gym_env, arch, insertion_type)
 
                             save_dir = os.path.join(
