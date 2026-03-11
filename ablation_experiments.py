@@ -14,6 +14,8 @@ from models.QModels import exp_decay_factor_to,TorchDDQN, \
 from env.MazeEnv import MazeEnv
 from env.MazeWrapper import StateEncoder, MazeGymWrapper
 from env.GPUMazeWrapper import GPUMazeWrapper
+from env.CPUMazeWrapper import CPUMazeWrapperAdapter
+from env.MazeWrapper import MazeGymWrapper
 
 from functools import reduce
 from collections import deque
@@ -804,7 +806,8 @@ def train_thread(
         mode_type:    LayerModeType,
         mutation_mode: MutationMode,
         runs:         int,
-        verbose:      bool = True
+        verbose:      bool = True,
+        maze_wrapper = GPUMazeWrapper
 ):
     _FN_REGISTRY = {
         "train_reserved_saecollab_tolerance_model": train_reserved_saecollab_tolerance_model,
@@ -816,12 +819,17 @@ def train_thread(
     mode_type = LayerModeType.from_tag(mode_type)
     device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # ── Build GPU-resident environment ────────────────────────────────────
-    env = GPUMazeWrapper(
-        MazeEnv(maze_path),
-        device=device,
-        **state_repr.opts          # same dict as MazeGymWrapper accepted
-    )
+    # ── Build environment ─────────────────────────────────────────────────
+    # GPUMazeWrapper  → constructed directly; returns GPU tensors natively.
+    # MazeGymWrapper  → wrapped in CPUMazeWrapperAdapter so training
+    #                   functions (written against GPUMazeWrapper) need no changes.
+    maze_env = MazeEnv(maze_path)
+    if maze_wrapper is GPUMazeWrapper:
+        env = GPUMazeWrapper(maze_env, device=device, **state_repr.opts)
+    else:
+        # Any CPU-based wrapper (e.g. MazeGymWrapper)
+        gym_env = maze_wrapper(maze_env, **state_repr.opts)
+        env     = CPUMazeWrapperAdapter(gym_env, device=device)
 
     metrics = fn(
         model_path, env, model_arch, concrete_arch,
@@ -833,8 +841,14 @@ def train_thread(
 
     if verbose:
         print(f"[{train_tag}] Training Complete")
+    
+    del env
+    del metrics
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
 
-    return metrics
+    return None  # metrics already saved to disk; no need to return the object
 
 def train_models(
     state: AblationProgramState,
@@ -846,18 +860,21 @@ def train_models(
     mode_type: LayerModeType,
     mutation_mode: MutationMode,
     runs: int,
-    processig_mode:Literal['sequential','threading','multiprocessing'] = 'multiprocessing'
+    processig_mode:Literal['sequential','threading','multiprocessing'] = 'multiprocessing',
+    maze_wrapper = GPUMazeWrapper,
 ):
     gym_env_maze = MazeGymWrapper(
         maze,
         **state_repr.opts
     )
-    tabular_like_width = gym_env_maze.action_size * gym_env_maze.rows \
-                         * gym_env_maze.cols 
+    
+    tabular_like_width = gym_env_maze.action_size * gym_env_maze.rows * gym_env_maze.cols 
+    
     concrete_arch = gen_concrete_arch(tabular_like_width,
                                       gym_env_maze,
                                       architecute,
                                       insertion_type)
+    
     save_concrete_arch_info(state.save_dir_path,concrete_arch)
     
     def create_out_paths(model_name:str) -> None:
@@ -868,9 +885,9 @@ def train_models(
         return model_path,metrics_path
 
     # Prepare directories and paths
-    dense_model_path,dense_metrics_path = create_out_paths("dense_model")
+    dense_model_path        ,dense_metrics_path         = create_out_paths("dense_model")
     sae_tolerance_model_path,sae_tolerance_metrics_path = create_out_paths("sae_tolerance_model")
-    sae_spaced_model_path,sae_spaced_metrics_path = create_out_paths("sae_spaced_model")
+    sae_spaced_model_path   ,sae_spaced_metrics_path    = create_out_paths("sae_spaced_model")
 
     train_targets = [
         TrainTargetClosure(
@@ -912,7 +929,8 @@ def train_models(
         "model_arch"   : architecute,
         "mode_type"    : mode_type.tag,
         "mutation_mode": mutation_mode,
-        "runs"         : runs
+        "runs"         : runs,
+        "maze_wrapper" : maze_wrapper,
     }
 
     if processig_mode == "sequential":
@@ -965,7 +983,8 @@ def train_models(
 def experiment_1(dir_path:str=None,
                  seed=None,
                  TABULAR_QLEARNING_PATH = "./c_qlearning/build/agentTrain.exe",
-                 processig_mode="sequential"
+                 processig_mode="sequential",
+                 maze_wrapper=GPUMazeWrapper,
                  ):
     dir_path = dir_path or 'experiment_1'
     seed     = seed or 333
@@ -984,9 +1003,9 @@ def experiment_1(dir_path:str=None,
     # COMBINATORIAL OPTIONS START
     
     MAZES = [
+        "./mazes/big_eg.maze",
         "./mazes/small_eg.maze",
         "./mazes/medium_eg.maze",
-        "./mazes/big_eg.maze"
     ]
 
     # USED BY ENV WRAPPERS 
@@ -1159,7 +1178,8 @@ def experiment_1(dir_path:str=None,
                                          layer_mode,
                                          mutation_mode,
                                          runs,
-                                         processig_mode=processig_mode
+                                         processig_mode=processig_mode,
+                                         maze_wrapper=maze_wrapper,
                                          )
 
                             # MODELS TRAINING ENDS HERE
@@ -1182,6 +1202,7 @@ def fast_experiment_1(dir_path:str=None,
                       seed=None,
                       TABULAR_QLEARNING_PATH = "./c_qlearning/build/agentTrain.exe",
                       max_workers=8,
+                      maze_wrapper=GPUMazeWrapper,
                       **kwargs):
     from concurrent.futures import ProcessPoolExecutor, as_completed
     import sys
@@ -1314,7 +1335,8 @@ def fast_experiment_1(dir_path:str=None,
                                         "mode_type"    : layer_mode.tag,
                                         "mutation_mode": mutation_mode,
                                         "runs"         : 1,
-                                        "verbose"      : False
+                                        "verbose"      : False,
+                                        "maze_wrapper" : maze_wrapper,
                                     })
 
     total_possible = TOTAL_EXPERIMENT_ITERS * 2  # 2 modelos por iteração (sae + dense)

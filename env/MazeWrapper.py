@@ -69,6 +69,7 @@ class MazeGymWrapper:
                  num_last_actions:int=None, #Number of before actions
                  possible_actions_feature:bool=False, #Enable check neighbours features
                  visited_count:bool = False,
+                 **kwargs
                  ):
         self.maze = maze
 

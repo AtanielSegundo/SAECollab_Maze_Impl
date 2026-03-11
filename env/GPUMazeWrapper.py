@@ -29,6 +29,7 @@ class GPUMazeWrapper:
         num_last_actions: int = None,
         possible_actions_feature: bool = False,
         visited_count: bool = False,
+        **kwargs
     ):
         # Import here to avoid circular deps when used standalone
         from env.MazeEnv import Action, GridCell
@@ -69,7 +70,7 @@ class GPUMazeWrapper:
 
         # ── Grid (CPU only — single int lookup per step, trivial) ─────────
         self._grid = maze.grid          # numpy uint8
-        self._rew  = {0: -0.01, 1: -0.5, 2: 1.0, 9: -0.1}
+        self._rew  = {v.value:v.reward for v in list(GridCell)}
 
         # ── Base encoding lookup tables ───────────────────────────────────
         n = self.rows * self.cols
