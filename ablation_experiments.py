@@ -1266,7 +1266,9 @@ def fast_experiment_1(dir_path:str=None,
         maze_env = MazeEnv(maze_path, rewards_scaled=False, pass_through_walls=False)
 
         EPISODES  = 400
-        MAX_STEPS = maze_env.rows * maze_env.cols * len(list(Action))
+        MAX_STEPS = maze_env.opens_count
+
+        print(f"[INFO] MAX STEPS = {MAX_STEPS} FOR {maze_path}")
 
         epsilon_decay = exp_decay_factor_to(
             final_epsilon=0.1,
