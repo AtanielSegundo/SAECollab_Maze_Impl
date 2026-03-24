@@ -52,14 +52,21 @@ class CompiledTrainMetrics:
     
     def compile_metrics(self, m: ModelTrainMetrics):
         for key, compile_arr in self.comp_metrics.items():
-            maped_key = m.header_map.get(key,None)
+            maped_key = m.header_map.get(key, None)
             if maped_key in m.available_metrics:
                 arr = m.__dict__[key]
                 for idx, elem in enumerate(arr):
+                    # Skip NaN/inf — don't poison the Welford accumulator
+                    try:
+                        if not math.isfinite(float(elem)):
+                            continue
+                    except (TypeError, ValueError):
+                        continue
+
                     if idx >= len(compile_arr):
-                        # The mean should be the element itself and the variance is 0
                         compile_arr.append((elem, 0))
                         self.comp_metrics_count[key].append(1)
+                            
                     else:
                         # ONLINE MEAN AND ONLINE VARIANCE UPDATE
                         old_mean, old_var = compile_arr[idx]
@@ -185,9 +192,8 @@ def _extract_mean_std(comp, metric_key):
 def _smooth(arr: np.ndarray, window: Optional[int]):
     if window is None or window <= 1 or arr.size == 0:
         return arr
-    w = np.ones(window) / window
-    return np.convolve(arr, w, mode='same')
-
+    import pandas as pd
+    return pd.Series(arr).rolling(window, min_periods=1, center=True).mean().to_numpy()
 
 def plot_compiled_metrics(
     compiled_metrics: Dict[str, Dict[str, object]],
@@ -300,17 +306,19 @@ def plot_compiled_metrics(
                     continue
 
             # optionally trim/pad to eps
-            if eps and means.size >= eps:
-                means = means[:eps]
-                stds = stds[:eps]
-            elif eps and means.size < eps:
-                pad = eps - means.size
-                means = np.concatenate([means, np.full(pad, np.nan)])
-                stds = np.concatenate([stds, np.full(pad, np.nan)])
-
             if smooth_window:
                 means = _smooth(means, smooth_window)
-                stds = _smooth(stds, smooth_window)
+                stds  = _smooth(stds,  smooth_window)
+
+            # pad AFTER smoothing
+            if eps and means.size >= eps:
+                means = means[:eps]
+                stds  = stds[:eps]
+    
+            elif eps and means.size < eps:
+                pad   = eps - means.size
+                means = np.concatenate([means, np.full(pad, np.nan)])
+                stds  = np.concatenate([stds,  np.full(pad, np.nan)])
 
             # compute what to plot as the "line" according to flags
             if max_no_mean:
@@ -375,17 +383,18 @@ def plot_compiled_metrics(
                 if means.size == 0:
                     continue
 
+                if smooth_window:                          # smooth first
+                    means = _smooth(means, smooth_window)
+                    stds = _smooth(stds, smooth_window)
+
                 if eps and means.size >= eps:
                     means = means[:eps]
                     stds = stds[:eps]
+                
                 elif eps and means.size < eps:
                     pad = eps - means.size
-                    means = np.concatenate([means, np.full(pad, np.nan)])
-                    stds = np.concatenate([stds, np.full(pad, np.nan)])
-
-                if smooth_window:
-                    means = _smooth(means, smooth_window)
-                    stds = _smooth(stds, smooth_window)
+                    means = np.concatenate([means, np.full(pad, np.nan)])  # pad after
+                    stds = np.concatenate([stds,  np.full(pad, np.nan)])
 
                 # apply same mean-mode logic for overlays
                 if max_no_mean:
@@ -521,6 +530,14 @@ def main(*args, **kwargs):
         "Out"   : SearchFilter("Out"),
     }
     out_file = 'plots/compared_mutations.png'
+    ablation_traverse(search_base,search_targets,search_filters,out_file)
+
+    search_filters = {
+        "Small" : SearchFilter("small_eg"),
+        "Medium": SearchFilter("medium_eg"),
+        "Big"   : SearchFilter("big_eg"),
+    }
+    out_file = 'plots/compared_maps.png'
     ablation_traverse(search_base,search_targets,search_filters,out_file)
 
     search_filters = {

@@ -264,12 +264,14 @@ class ModelTrainMetrics:
                         raw = row.get(csv_h, "").strip()
                         if is_float(raw):
                             val = float(raw)
+                            if not math.isfinite(val):
+                                val = cls.type_map.get(internal, float)()
                         elif raw.isnumeric():
                             val = int(raw)
                         else:
-                            val = raw
+                            val = cls.type_map.get(internal, float)()
                         data[internal].append(val)
-                
+
                 except ValueError as e:
                     raise ValueError(f"Invalid data format in CSV at line {row_idx}: {e}")
 

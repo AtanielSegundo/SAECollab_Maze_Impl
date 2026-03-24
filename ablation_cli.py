@@ -1,3 +1,4 @@
+import os
 from sys import argv
 from typing import Callable
 from Ablation import ablation_clean_dir
@@ -34,22 +35,35 @@ if __name__ == "__main__":
 
     print(f"[INFO] Using Experiment: {experiment.__name__}")
 
-    custom_seed     = None
-    custom_dir_path = None
+    custom_params   = dict() 
 
     # HANDLING CUSTOM SEED
     for flag in ('-s', '--seed'):
         if flag in args:
-            custom_seed = int(args[args.index(flag) + 1])
+            custom_params["seed"] = int(args[args.index(flag) + 1])
             break
     
     # HANDLING CUSTOM DIR PATH
     for flag in ('-d', '--dir'):
         if flag in args:
-            custom_dir_path = args[args.index(flag) + 1]
+            custom_params["dir_path"] = args[args.index(flag) + 1]
             break
+    
+    for flag in ('-mw','--max_workers'):
+        if flag in args:
+            custom_params["max_workers"] = int(args[args.index(flag) + 1])
+            break
+    
+    for flag in ('-learns','--learns_by_epochs'):
+        if flag in args:
+            val = int(args[args.index(flag) + 1])
+            if val > 0:
+                custom_params["learns_by_epochs"] = val
+            else:
+                print(f"[ERROR] {flag} Val Should be Greater Than 0")
+                exit(-1)
 
     if (flag := "--clean") in args:
-        ablation_clean_dir(custom_dir_path)
+        ablation_clean_dir(os.path.join(custom_params['dir_path'],custom_params['seed']))
 
-    experiment(custom_dir_path,custom_seed)
+    experiment(**custom_params)

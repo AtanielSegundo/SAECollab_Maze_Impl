@@ -3,6 +3,7 @@
 import time
 import threading
 import multiprocessing
+multiprocessing.set_start_method("spawn", force=True)
 
 from datetime import datetime, timedelta
 from typing import *
@@ -10,6 +11,7 @@ from os.path import basename
 from Ablation import *
 from models.QModels import exp_decay_factor_to,TorchDDQN, \
                            SAECollabDDQN,ReservedSAECollabDDQN,NewLayerCfg
+from models.AStar import a_star_maze_solve
 
 from env.MazeEnv import MazeEnv
 from env.MazeWrapper import StateEncoder, MazeGymWrapper
@@ -316,7 +318,7 @@ def train_saecollab_tolerance_model(
         # Convert loss to Python float, handling CUDA tensors
         if hasattr(agent, 'loss'):
             if isinstance(agent.loss, torch.Tensor):
-                loss_val = float(agent.loss.cpu().detach())
+                loss_val = agent.loss.item()
             else:
                 loss_val = float(agent.loss) if agent.loss is not None else 0.0
         else:
@@ -512,7 +514,7 @@ def train_reserved_saecollab_tolerance_model(
 
         if hasattr(agent, 'loss'):
             if isinstance(agent.loss, torch.Tensor):
-                loss_val = float(agent.loss.cpu().detach())
+                loss_val = agent.loss.item()
             else:
                 loss_val = float(agent.loss) if agent.loss is not None else 0.0
         else:
@@ -566,6 +568,9 @@ def train_reserved_saecollab_tolerance_model(
                     episodes_since_last_branch = 0
 
         delta_time = time.perf_counter() - epoch_start_time
+        
+        # print(episode, cum_reward, cum_goals, success_rate, loss_val, cum_steps, parameters_cnt, delta_time, current_branch)
+        
         agent_metrics.append(episode, cum_reward, cum_goals, success_rate,
                              loss_val, cum_steps, parameters_cnt,
                              delta_time, current_branch)
@@ -638,7 +643,7 @@ def train_saecollab_spaced_model(
         # Convert loss to Python float, handling CUDA tensors
         if hasattr(agent, 'loss'):
             if isinstance(agent.loss, torch.Tensor):
-                loss_val = float(agent.loss.cpu().detach())
+                loss_val = agent.loss.item()
             else:
                 loss_val = float(agent.loss) if agent.loss is not None else 0.0
         else:
@@ -771,7 +776,7 @@ def train_baseline_dense_model(
         # Convert loss to Python float, handling CUDA tensors
         if hasattr(agent, 'loss'):
             if isinstance(agent.loss, torch.Tensor):
-                loss_val = float(agent.loss.cpu().detach())
+                loss_val = agent.loss.item()
             else:
                 loss_val = float(agent.loss) if agent.loss is not None else 0.0
         else:
@@ -1007,9 +1012,9 @@ def experiment_1(dir_path:str=None,
     # COMBINATORIAL OPTIONS START
     
     MAZES = [
-        "./mazes/big_eg.maze",
         "./mazes/small_eg.maze",
         "./mazes/medium_eg.maze",
+        "./mazes/big_eg.maze",
     ]
 
     # USED BY ENV WRAPPERS 
@@ -1092,9 +1097,11 @@ def experiment_1(dir_path:str=None,
         
         # GLOBAL HYPERPARAMETERS
         EPISODES  = 400
-        MAX_STEPS = maze_env.rows * maze_env.cols * len(list(Action))
-        # MAX_STEPS = maze_env.opens_count * len(list(Action))
+        #MAX_STEPS = maze_env.rows * maze_env.cols * len(list(Action))
         
+        MAX_STEPS = len(list(Action)) * maze_env.opens_count
+        MAX_STEPS = int(MAX_STEPS)
+
         epsilon_decay = exp_decay_factor_to(
                 final_epsilon=0.1,
                 final_step=MAX_STEPS * EPISODES,
@@ -1202,32 +1209,62 @@ def experiment_1(dir_path:str=None,
 
         state.remove_save_path_head()
 
-def fast_experiment_1(dir_path:str=None,
-                      seed=None,
-                      TABULAR_QLEARNING_PATH = "./c_qlearning/build/agentTrain.exe",
-                      max_workers=8,
-                      maze_wrapper=GPUMazeWrapper,
-                      **kwargs):
+# ── Worker warm-up ────────────────────────────────────────────────────────
+# Must be a top-level function so multiprocessing can pickle it.
+# Called once per worker process immediately after spawn, BEFORE any job
+# is sent to it.  By the time the first real job arrives the worker has
+# already paid the cost of:
+#   • importing torch (and every transitive heavy import)
+#   • allocating a CUDA context  (the slow cudaDeviceReset / cuInit path)
+# Without this, all that cost lands on the *first job* of every worker,
+# making the experiment appear stalled even though workers are "running".
+def _warm_worker():
+    import torch
+    # Force CUDA context creation right now.
+    # A tiny tensor allocation is enough — no memory is kept after this.
+    if torch.cuda.is_available():
+        _dummy = torch.zeros(1, device="cuda")
+        del _dummy
+        torch.cuda.empty_cache()
+    # Pre-import the heavy project modules so the worker's module cache is
+    # already populated before job pickling/unpickling begins.
+    try:
+        from models.QModels import TorchDDQN, SAECollabDDQN, ReservedSAECollabDDQN   # noqa
+        from env.MazeEnv import MazeEnv                                              # noqa
+        from env.GPUMazeWrapper import GPUMazeWrapper                                # noqa
+        from env.CPUMazeWrapper import CPUMazeWrapperAdapter                         # noqa
+    except ImportError:
+        pass  # if paths differ, the real imports inside train_thread will still work
+
+
+def fast_experiment_1(
+    dir_path: str = None,
+    seed=None,
+    TABULAR_QLEARNING_PATH="./c_qlearning/build/agentTrain.exe",
+    max_workers=6,
+    learns_by_epochs=None,
+    maze_wrapper=GPUMazeWrapper,
+    **kwargs,
+):
     from concurrent.futures import ProcessPoolExecutor, as_completed
+    from collections import deque
     import sys
-    
-    dir_path = dir_path or 'experiment_1'
-    state = AblationProgramState.load_from_json(dir_path,seed)
-    seed     = seed or 333
+    import traceback
+
+    dir_path = dir_path or "experiment_1"
+    seed = seed or 333
     set_seed(seed)
 
+    state = AblationProgramState.load_from_json(dir_path, seed)
     if state is None:
-        state = AblationProgramState(
-            TABULAR_QLEARNING_PATH,
-            dir_path,
-            seed
-        )
+        state = AblationProgramState(TABULAR_QLEARNING_PATH, dir_path, seed)
         state.env_update()
 
+    # ── Experiment configuration ──────────────────────────────────────────
     MAZES = [
         "./mazes/small_eg.maze",
         "./mazes/medium_eg.maze",
-        "./mazes/big_eg.maze"
+        "./mazes/big_eg.maze",
     ]
 
     STATE_REPRESENTATIONS = [
@@ -1238,46 +1275,44 @@ def fast_experiment_1(dir_path:str=None,
     ]
 
     N_MAX_LAYERS = 4
-    width_delta  = 1 / N_MAX_LAYERS
+    width_delta = 1 / N_MAX_LAYERS
     ARCHITECTURES = [
-        ModelArch(N_MAX_LAYERS, LayersConfig(1/2,1,1/2), LayersConfig(width_delta,1,width_delta), LayersConfig(nn.ReLU,nn.Identity,nn.ReLU),  LayersConfig(True,True,True)),
-        ModelArch(N_MAX_LAYERS, LayersConfig(1/2,1,1/4), LayersConfig(width_delta,1,width_delta), LayersConfig(nn.ReLU,nn.Identity,nn.Identity), LayersConfig(True,True,True)),
-        ModelArch(N_MAX_LAYERS, LayersConfig(1/4,1,1/4), LayersConfig(width_delta,1,width_delta), LayersConfig(nn.ReLU,nn.Identity,nn.Identity), LayersConfig(False,True,False)),
-        ModelArch(N_MAX_LAYERS, LayersConfig(1/4,1,1/2), LayersConfig(width_delta,1,width_delta), LayersConfig(nn.ReLU,nn.Identity,nn.ReLU),  LayersConfig(False,True,False)),
+        ModelArch(N_MAX_LAYERS, LayersConfig(1/2, 1, 1/2), LayersConfig(width_delta, 1, width_delta), LayersConfig(nn.ReLU, nn.Identity, nn.ReLU),     LayersConfig(True,  True, True)),
+        ModelArch(N_MAX_LAYERS, LayersConfig(1/2, 1, 1/4), LayersConfig(width_delta, 1, width_delta), LayersConfig(nn.ReLU, nn.Identity, nn.Identity), LayersConfig(True,  True, True)),
+        ModelArch(N_MAX_LAYERS, LayersConfig(1/4, 1, 1/4), LayersConfig(width_delta, 1, width_delta), LayersConfig(nn.ReLU, nn.Identity, nn.Identity), LayersConfig(False, True, False)),
+        ModelArch(N_MAX_LAYERS, LayersConfig(1/4, 1, 1/2), LayersConfig(width_delta, 1, width_delta), LayersConfig(nn.ReLU, nn.Identity, nn.ReLU),     LayersConfig(False, True, False)),
     ]
 
     INSERTION_TYPES = list(LayerInsertionType)
     LAYER_MODES     = list(LayerModeType)[::-1]
     MUTATION_MODES  = list(MutationMode)
 
-    runs = 1
+    TRAIN_TARGETS = [
+        (train_reserved_saecollab_tolerance_model, "sae_tolerance_model"),
+        (train_baseline_dense_model,               "dense_model"),
+    ]
 
-    COMB_ARRAYS_LIST = [MAZES, STATE_REPRESENTATIONS, ARCHITECTURES, INSERTION_TYPES, LAYER_MODES, MUTATION_MODES]
-    DIMENSIONS = [len(arr) for arr in COMB_ARRAYS_LIST]
-    TOTAL_EXPERIMENT_ITERS = reduce(lambda x,y: x * y, DIMENSIONS)
-
-    skip_indices = state.get_skip_indices(DIMENSIONS)
-    print(f"[INFO] Starting from indices: {skip_indices}")
-    print(f"[INFO] Completed iterations: {state.completed_iteration + 1}/{TOTAL_EXPERIMENT_ITERS}")
-
-    all_jobs = []
-
-    for maze_idx, maze_path in enumerate(MAZES):
-        maze_env = MazeEnv(maze_path, rewards_scaled=False, pass_through_walls=False)
-
+    # ── Step 1: tabular baselines + hp, all mazes, before pool opens ──────
+    maze_configs = {}  # maze_path -> (maze_env, hp)
+    for maze_path in MAZES:
+        maze_env  = MazeEnv(maze_path, rewards_scaled=False, pass_through_walls=False)
         EPISODES  = 400
-        MAX_STEPS = maze_env.opens_count
-
-        print(f"[INFO] MAX STEPS = {MAX_STEPS} FOR {maze_path}")
-
+        MAX_STEPS = int(len(list(Action)) * maze_env.opens_count)
+        LEARN_STEPS = 4
+        if isinstance(learns_by_epochs,int):
+            LEARN_STEPS = max(LEARN_STEPS,np.ceil(MAX_STEPS / learns_by_epochs))
+            LEARN_STEPS = int(LEARN_STEPS)
+    
+        print(f"[INFO] {basename(maze_path)}: MAX_STEPS = {MAX_STEPS}, LEARN_STEPS = {LEARN_STEPS}")
+        
         epsilon_decay = exp_decay_factor_to(
             final_epsilon=0.1,
             final_step=MAX_STEPS * EPISODES,
             epsilon_start=1.0,
-            convergence_threshold=0.01
+            convergence_threshold=0.01,
         )
-
-        hyperparameters = GlobalHyperparameters(
+        
+        hp = GlobalHyperparameters(
             learning_rate           = 1e-5,
             new_layer_learning_rate = 5e-5,
             discount_factor         = 0.999,
@@ -1285,76 +1320,77 @@ def fast_experiment_1(dir_path:str=None,
             episodes                = EPISODES,
             max_steps               = MAX_STEPS,
             batch_size              = 512,
-            steps_learn_interval    = 4,
+            steps_learn_interval    = LEARN_STEPS,
             rolling_window_size     = 20,
             insert_patience         = 15,
             insert_min_goals        = 5,
-            insert_min_variance     = 0.6
+            insert_min_variance     = 0.6,
         )
-
+        
         try:
-            state.train_tabular_agent(maze_path, hyperparameters, runs)
+            state.train_tabular_agent(maze_path, hp, runs=1)
         except Exception as e:
             print(f"[WARNING] Cant Train Tabular Agent: {e}")
         state.save_a_star_qtable(maze_path)
+        maze_configs[maze_path] = (maze_env, hp)
+
+    all_jobs = []
+    for maze_path in MAZES:
+        maze_env, hp = maze_configs[maze_path]
+        maze_tag     = basename(maze_path).split(".")[0]
 
         for state_representation in STATE_REPRESENTATIONS:
+            gym_env    = MazeGymWrapper(maze_env, **state_representation.opts)
+            base_width = gym_env.action_size * maze_env.rows * maze_env.cols
+
             for arch in ARCHITECTURES:
                 for insertion_type in INSERTION_TYPES:
+                    concrete_arch = gen_concrete_arch(base_width, gym_env, arch, insertion_type)
+
                     for layer_mode in LAYER_MODES:
                         for mutation_mode in MUTATION_MODES:
-                            gym_env       = MazeGymWrapper(maze_env, **state_representation.opts)
-                            base_width    = gym_env.action_size * maze_env.rows * maze_env.cols
-                            concrete_arch = gen_concrete_arch(base_width, gym_env, arch, insertion_type)
-
                             save_dir = os.path.join(
                                 dir_path, str(seed),
-                                basename(maze_path).split(".")[0],
+                                maze_tag,
                                 state_representation.tag,
                                 arch.tag,
                                 insertion_type.tag,
                                 layer_mode.tag,
-                                str(mutation_mode).split(".")[-1]
+                                str(mutation_mode).split(".")[-1],
                             )
                             os.makedirs(save_dir, exist_ok=True)
 
-                            for train_fn, subdir in [
-                                (train_reserved_saecollab_tolerance_model, "sae_tolerance_model"),
-                                (train_baseline_dense_model,               "dense_model"),
-                            ]:
+                            for train_fn, subdir in TRAIN_TARGETS:
                                 model_dir    = os.path.join(save_dir, subdir)
                                 model_path   = os.path.join(model_dir, "model.pth")
                                 metrics_path = os.path.join(model_dir, "metrics.csv")
                                 os.makedirs(model_dir, exist_ok=True)
 
-                                if not os.path.exists(model_path):
-                                    all_jobs.append({
-                                        "maze_path"    : maze_path,
-                                        "model_path"   : model_path,
-                                        "metrics_path" : metrics_path,
-                                        "train_fn"     : train_fn.__name__,
-                                        "train_tag"    : subdir,
-                                        "hp"           : hyperparameters,
-                                        "state_repr"   : state_representation,
-                                        "concrete_arch": concrete_arch,
-                                        "model_arch"   : arch,
-                                        "mode_type"    : layer_mode.tag,
-                                        "mutation_mode": mutation_mode,
-                                        "runs"         : 1,
-                                        "verbose"      : False,
-                                        "maze_wrapper" : maze_wrapper,
-                                    })
+                                if os.path.exists(model_path):
+                                    continue
 
-    total_possible = TOTAL_EXPERIMENT_ITERS * 2  # 2 modelos por iteração (sae + dense)
-    total          = len(all_jobs)
-    already_done   = total_possible - total       # jobs que já existiam em disco
-    done       = 0
-    errors     = 0
-    start_time = time.time()
+                                all_jobs.append({
+                                    "maze_path"    : maze_path,
+                                    "model_path"   : model_path,
+                                    "metrics_path" : metrics_path,
+                                    "train_fn"     : train_fn.__name__,
+                                    "train_tag"    : subdir,
+                                    "hp"           : hp,
+                                    "state_repr"   : state_representation,
+                                    "concrete_arch": concrete_arch,
+                                    "model_arch"   : arch,
+                                    "mode_type"    : layer_mode.tag,
+                                    "mutation_mode": mutation_mode,
+                                    "runs"         : 1,
+                                    "verbose"      : False,
+                                    "maze_wrapper" : maze_wrapper,
+                                })
 
-    # ── rolling window for per-job timing ──────────────────────────────────
-    WINDOW      = 50          # use last N completions to estimate speed
-    finish_times: deque = deque(maxlen=WINDOW)   # timestamps of recent completions
+    total = len(all_jobs)
+
+    # ── Progress helpers ──────────────────────────────────────────────────
+    WINDOW       = 50
+    finish_times: deque = deque(maxlen=WINDOW)
 
     def fmt_time(t: float) -> str:
         h = int(t // 3600)
@@ -1366,81 +1402,60 @@ def fast_experiment_1(dir_path:str=None,
             return f"{m}m {s:02d}s"
         return f"{s}s"
 
+    done       = 0
+    errors     = 0
+    start_time = time.time()
+
     def print_progress(job: dict, job_elapsed: float, error: Exception | None = None):
-        """
-        Prints a compact, always-visible block every time a job finishes.
-        No cursor tricks — just a clean timestamped line + summary every N jobs.
-        """
         nonlocal done, errors
+        finish_times.append(time.time())
 
-        now        = time.time()
-        wall_clock = now - start_time
-        finish_times.append(now)
-
-        # ETA from rolling window
         if len(finish_times) >= 2:
-            window_span   = finish_times[-1] - finish_times[0]
-            rate          = (len(finish_times) - 1) / window_span   # jobs/sec
-            remaining     = total - done
-            eta_seconds   = remaining / rate if rate > 0 else 0
-            eta_str       = fmt_time(eta_seconds)
-            rate_str      = f"{rate * 60:.1f} jobs/min"
+            window_span = finish_times[-1] - finish_times[0]
+            rate        = (len(finish_times) - 1) / window_span if window_span > 0 else 0
+            remaining   = total - done
+            eta_str     = fmt_time(remaining / rate) if rate > 0 else "?"
+            rate_str    = f"{rate * 60:.1f} jobs/min"
         else:
             eta_str  = "calculating..."
             rate_str = "—"
 
-        # Progress bar (40 chars)
-        global_done = already_done + done
-        pct         = global_done / total_possible
-        bar_filled  = int(40 * pct)
-        bar         = "█" * bar_filled + "░" * (40 - bar_filled)
-        bar_filled = int(40 * pct)
-        bar        = "█" * bar_filled + "░" * (40 - bar_filled)
+        pct      = done / total if total else 0
+        bar_fill = int(40 * pct)
+        bar      = "█" * bar_fill + "░" * (40 - bar_fill)
+        status   = "✓" if error is None else "✗"
+        ts       = time.strftime("%H:%M:%S")
 
-        # Short job label: just the last 3 path components + model type
-        parts      = job["model_path"].replace("\\", "/").split("/")
-        short_path = "/".join(parts[-4:]) if len(parts) >= 4 else job["model_path"]
-
-        status = "✓" if error is None else "✗"
-        err_info = f"  ⚠ {type(error).__name__}: {str(error)[:80]}" if error else ""
-
-        # Always print the per-job line
-        timestamp = time.strftime("%H:%M:%S")
         print(
-            f"[{timestamp}] {status} [{global_done:>4}/{total_possible}] "
-            f"({pct*100:5.1f}%) | job took {fmt_time(job_elapsed):<8} | "
-            f"ETA {eta_str} @ {rate_str}"
+            f"[{ts}] {status} [{done:>5}/{total}] ({pct*100:5.1f}%) "
+            f"| took {fmt_time(job_elapsed):<9}| ETA {eta_str} @ {rate_str}"
         )
-        if err_info:
-            print(err_info)
+        if error:
+            print(f"  ⚠ {type(error).__name__}: {str(error)[:100]}")
 
-        # Every 10 jobs (or first, or last) print a full summary block
         if done == 1 or done % 10 == 0 or done == total:
             sep = "─" * 72
             print(sep)
-            print(f"  SUMMARY  |  Done: {global_done}/{total_possible}  (this session: {done}/{total})  |  ...")
-            print(f"  Progress: [{bar}] {pct*100:.1f}%")
-            print(f"  ETA: {eta_str}  |  Speed: {rate_str}")
-            print(f"  Last job: {short_path}")
+            print(f"  Done: {done}/{total}  |  Errors: {errors}")
+            print(f"  [{bar}] {pct*100:.1f}%  |  ETA: {eta_str}  |  {rate_str}")
+            print(f"  Last: {job['model_path']}")
             print(sep)
 
         sys.stdout.flush()
 
-    print(f"\n[INFO] Total jobs to run : {total}")
-    print(f"[INFO] Workers           : {max_workers}")
-    print(f"[INFO] Starting at       : {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"\n[INFO] Jobs to run : {total}")
+    print(f"[INFO] Workers     : {max_workers}")
+    print(f"[INFO] Start       : {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"[INFO] Pre-warming {max_workers} workers (CUDA init + imports)...")
     print("=" * 72)
 
-    with ProcessPoolExecutor(max_workers=max_workers) as pool:
-        # tag each future with its submission timestamp
-        futures = {}
-        for job in all_jobs:
-            f = pool.submit(train_thread, **job)
-            futures[f] = (job, time.time())   # store job + submit time
+    # ── Step 3: submit everything at once, iterate completions immediately ─
+    with ProcessPoolExecutor(max_workers=max_workers, initializer=_warm_worker) as pool:
+        futures = {pool.submit(train_thread, **job): (job, time.time()) for job in all_jobs}
+        print(f"[INFO] All {total} jobs submitted — workers running...\n")
 
         for future in as_completed(futures):
             job, submit_time = futures[future]
-            job_elapsed = time.time() - submit_time
             done += 1
             error = None
             try:
@@ -1448,8 +1463,10 @@ def fast_experiment_1(dir_path:str=None,
             except Exception as e:
                 error = e
                 errors += 1
-
-            print_progress(job, job_elapsed, error)
+                print("\n----- WORKER ERROR -----")
+                print("JOB:", job["model_path"])
+                print(traceback.format_exc())
+            print_progress(job, time.time() - submit_time, error)
 
     total_time = time.time() - start_time
     print("\n" + "=" * 72)
@@ -1461,4 +1478,4 @@ def fast_experiment_1(dir_path:str=None,
     print(f"  Avg/job    : {fmt_time(total_time / total) if total else '—'}")
     print("=" * 72)
 
-SELECTABLE_EXPERIMENTS = [experiment_1,fast_experiment_1] 
+SELECTABLE_EXPERIMENTS = [experiment_1,fast_experiment_1]

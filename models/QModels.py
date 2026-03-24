@@ -1,5 +1,8 @@
 import torch
-torch.set_float32_matmul_precision('high')
+
+torch.set_num_threads(2)
+if torch.cuda.is_available():
+    torch.set_float32_matmul_precision('high')
 
 import torch.nn as nn
 import torch.optim as optim
@@ -22,11 +25,11 @@ class ReplayBuffer:
 
     def push(self, state, action, reward, next_state, done):
         self.buffer.append(Transition(
-            np.asarray(state, dtype=np.float32).reshape(-1),
+            torch.as_tensor(state, dtype=torch.float32),
             action,
-            float(reward),
-            np.asarray(next_state, dtype=np.float32).reshape(-1),
-            bool(done)
+            reward,
+            torch.as_tensor(next_state, dtype=torch.float32),
+            done
         ))
 
     def sample(self, batch_size: int):
@@ -36,6 +39,96 @@ class ReplayBuffer:
 
     def __len__(self):
         return len(self.buffer)
+
+class FastReplayBuffer:
+    """
+    Preallocated ring buffer for states/next_states/actions/rewards/dones.
+    Stores tensors (pinned CPU or GPU). sample(batch_size, device, non_blocking=True)
+    returns tensors already on the requested device.
+    """
+    def __init__(self, capacity: int, state_shape: Tuple[int, ...],
+                 storage_device: Union[str, torch.device] = "cpu",
+                 pin_memory: bool = True, dtype=torch.float32):
+        self.capacity = int(capacity)
+        self.state_shape = tuple(state_shape)
+        self.idx = 0
+        self.size = 0
+        self.dtype = dtype
+
+        self.storage_device = torch.device(storage_device)
+        self.pin_memory = bool(pin_memory) and (self.storage_device.type == "cpu")
+
+        alloc_kwargs = {"dtype": self.dtype}
+        if self.pin_memory:
+            alloc_kwargs["pin_memory"] = True
+
+        # allocate storage tensors
+        self.states = torch.empty((self.capacity, *self.state_shape), **alloc_kwargs)
+        self.next_states = torch.empty((self.capacity, *self.state_shape), **alloc_kwargs)
+        self.actions = torch.empty((self.capacity,), dtype=torch.long)
+        self.rewards = torch.empty((self.capacity,), dtype=torch.float32)
+        self.dones = torch.empty((self.capacity,), dtype=torch.uint8)
+
+        # move storage to GPU if requested
+        if self.storage_device.type == "cuda":
+            self.states = self.states.to(self.storage_device)
+            self.next_states = self.next_states.to(self.storage_device)
+            self.actions = self.actions.to(self.storage_device)
+            self.rewards = self.rewards.to(self.storage_device)
+            self.dones = self.dones.to(self.storage_device)
+
+    def push(self, state, action, reward, next_state, done):
+        if not torch.is_tensor(state):
+            state = torch.as_tensor(state, dtype=self.dtype)
+        if not torch.is_tensor(next_state):
+            next_state = torch.as_tensor(next_state, dtype=self.dtype)
+
+        if state.ndim == 2 and state.shape[0] == 1:
+            state = state.squeeze(0)
+        if next_state.ndim == 2 and next_state.shape[0] == 1:
+            next_state = next_state.squeeze(0)
+
+        if state.device != self.states.device:
+            state = state.to(self.states.device)
+        if next_state.device != self.next_states.device:
+            next_state = next_state.to(self.next_states.device)
+
+        self.states[self.idx].copy_(state.reshape(self.state_shape))
+        self.next_states[self.idx].copy_(next_state.reshape(self.state_shape))
+        self.actions[self.idx] = int(action)
+        self.rewards[self.idx] = float(reward)
+        self.dones[self.idx] = 1 if done else 0
+
+        self.idx = (self.idx + 1) % self.capacity
+        self.size = min(self.size + 1, self.capacity)
+
+    def __len__(self):
+        return int(self.size)
+
+    def sample(self, batch_size: int, device: Optional[Union[str, torch.device]] = None,
+               non_blocking: bool = True):
+        assert self.size > 0, "Buffer is empty"
+        # sample indices on storage device (fast)
+        idxs = torch.randint(0, self.size, (batch_size,), dtype=torch.long, device=self.states.device)
+
+        states_b = self.states.index_select(0, idxs)
+        next_states_b = self.next_states.index_select(0, idxs)
+        actions_b = self.actions.index_select(0, idxs)
+        rewards_b = self.rewards.index_select(0, idxs)
+        dones_b = self.dones.index_select(0, idxs)
+
+        if device is None:
+            return states_b, actions_b, rewards_b, next_states_b, dones_b
+
+        target_device = torch.device(device)
+        if target_device != self.states.device:
+            states_b = states_b.to(target_device, non_blocking=non_blocking)
+            next_states_b = next_states_b.to(target_device, non_blocking=non_blocking)
+            actions_b = actions_b.to(target_device, non_blocking=non_blocking)
+            rewards_b = rewards_b.to(target_device, non_blocking=non_blocking)
+            dones_b = dones_b.to(target_device, non_blocking=non_blocking)
+
+        return states_b, actions_b, rewards_b, next_states_b, dones_b
 
 def exp_decay_factor_to(final_epsilon: float, 
                         final_step: int, 
@@ -140,7 +233,13 @@ class TorchDDQN:
                  grad_clip: float = 10.0,
                  min_replay_size: int = 1000):
 
-        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        if device is None:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = torch.device(device)
+
+        if self.device.type == "cuda" and not torch.cuda.is_available():
+            self.device = torch.device("cpu")
         self.state_size = state_size
         self.action_size = action_size
         self.gamma = gamma
@@ -156,8 +255,8 @@ class TorchDDQN:
         self.tau = tau
         self.grad_clip = grad_clip
         self.min_replay_size = min_replay_size
+        self.loss = 0.0  # FIX: initialise so hasattr() always finds it
 
-        # === NOVO: AMP + torch.compile ===
         self.use_amp = self.device.type == "cuda"
         self.scaler = GradScaler() if self.use_amp else None
 
@@ -168,7 +267,14 @@ class TorchDDQN:
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=lr)
         self.loss_fn = nn.HuberLoss()
 
-        self.replay = ReplayBuffer(capacity=buffer_size)
+        # self.replay = ReplayBuffer(capacity=buffer_size)
+        self.replay = FastReplayBuffer(capacity=buffer_size,
+                                        state_shape=(self.state_size,),
+                                        storage_device="cpu",
+                                        pin_memory=torch.cuda.is_available(),
+                                        dtype=torch.float32
+                                        )
+
 
     def compile(self):
         if torch.__version__ >= "2.0" and self.device.type == "cuda":
@@ -201,7 +307,7 @@ class TorchDDQN:
 
     def remember(self, state, action, reward, next_state, done):
         self.replay.push(state, action, reward, next_state, done)
-        self.learn_steps += 1
+        self.learn_steps += 1  # FIX: only incremented here, never inside learn()
         if self.learn_steps % self.learn_interval == 0:
             self.learn()
 
@@ -209,30 +315,28 @@ class TorchDDQN:
         if len(self.replay) < self.min_replay_size:
             return
 
-        batch = self.replay.sample(self.batch_size)
+        states_t, actions_t, rewards_t, next_states_t, dones_t = \
+        self.replay.sample(self.batch_size, device=self.device, non_blocking=True)
 
-        states_t      = torch.from_numpy(np.stack(batch.state)).to(self.device, non_blocking=True)
-        next_states_t = torch.from_numpy(np.stack(batch.next_state)).to(self.device, non_blocking=True)
+        # ensure dtypes
+        actions_t = actions_t.long()
+        rewards_t = rewards_t.float()
+        dones_t = dones_t.float()
 
-        actions = np.array(batch.action, dtype=np.int64)
-        rewards = np.array(batch.reward, dtype=np.float32)
-        dones = np.array(batch.done, dtype=np.uint8)
-
-        actions_t = torch.from_numpy(actions).long().to(self.device, non_blocking=True)
-        rewards_t = torch.from_numpy(rewards).float().to(self.device, non_blocking=True)
-        dones_t = torch.from_numpy(dones).float().to(self.device, non_blocking=True)
-
-        # === AMP (Mixed Precision) ===
         if self.use_amp:
+            # FIX: only the forward passes run under autocast (fp16).
+            # The loss is computed in fp32 OUTSIDE autocast to prevent
+            # fp16 underflow (FTZ) turning small initial losses into 0.0.
             with autocast("cuda"):
                 q_values = self.policy_net(states_t).gather(1, actions_t.unsqueeze(1)).squeeze(1)
-
                 with torch.no_grad():
                     next_actions = self.policy_net(next_states_t).argmax(1)
-                    next_q = self.target_net(next_states_t).gather(1, next_actions.unsqueeze(1)).squeeze(1)
-                    target_q = rewards_t + self.gamma * next_q * (1.0 - dones_t)
+                    next_q       = self.target_net(next_states_t).gather(1, next_actions.unsqueeze(1)).squeeze(1)
+                    target_q     = rewards_t + self.gamma * next_q * (1.0 - dones_t)
 
-                loss = self.loss_fn(q_values, target_q)
+            # fp32 loss — outside autocast
+            loss = self.loss_fn(q_values.float(), target_q.float())
+            self.loss = loss.item()
 
             self.optimizer.zero_grad()
             self.scaler.scale(loss).backward()
@@ -242,13 +346,14 @@ class TorchDDQN:
             self.scaler.update()
         else:
             q_values = self.policy_net(states_t).gather(1, actions_t.unsqueeze(1)).squeeze(1)
-
             with torch.no_grad():
                 next_actions = self.policy_net(next_states_t).argmax(1)
-                next_q = self.target_net(next_states_t).gather(1, next_actions.unsqueeze(1)).squeeze(1)
-                target_q = rewards_t + self.gamma * next_q * (1.0 - dones_t)
+                next_q       = self.target_net(next_states_t).gather(1, next_actions.unsqueeze(1)).squeeze(1)
+                target_q     = rewards_t + self.gamma * next_q * (1.0 - dones_t)
 
             loss = self.loss_fn(q_values, target_q)
+            self.loss = loss.item()  # FIX: store scalar, not tensor
+
             self.optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), self.grad_clip)
@@ -274,10 +379,18 @@ class TorchDDQN:
         else:
             self.target_net.load_state_dict(self.policy_net.state_dict())
 
-    def __call__(self, state):
-        if not isinstance(state, torch.Tensor):
-            state = torch.tensor(state, dtype=torch.float32).to(self.device)
-        return self.policy_net(state).detach().cpu()
+    def __call__(self, state, return_numpy: bool = False):
+        if not torch.is_tensor(state):
+            state = torch.as_tensor(state, dtype=torch.float32, device=self.device)
+        else:
+            if state.device != self.device:
+                state = state.to(self.device, non_blocking=True)
+        if state.ndim == 1:
+            state = state.unsqueeze(0)
+        out = self.policy_net(state).detach()
+        if return_numpy:
+            return out.cpu().numpy()
+        return out
     
 
 class SAECollabDDQN:
@@ -303,11 +416,17 @@ class SAECollabDDQN:
                  min_replay_size: int = 1000,
                  use_bias: LayersConfig = None):
 
-        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        if device is None:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = torch.device(device)
+        if self.device.type == "cuda" and not torch.cuda.is_available():
+            self.device = torch.device("cpu")
+            
         self.state_size = state_size
         self.action_size = action_size
+        self.loss = 0.0  # FIX: initialise so hasattr() always finds it
 
-        # === NOVO: AMP + compile ===
         self.use_amp = self.device.type == "cuda"
         self.scaler = GradScaler() if self.use_amp else None
 
@@ -319,6 +438,7 @@ class SAECollabDDQN:
                                        accelerate_etas=accelerate_etas,
                                        device=self.device,
                                        use_bias=use_bias)
+                                       
         self.target_net = copy.deepcopy(self.policy_net).to(self.device)
         self.target_net.eval()
 
@@ -344,7 +464,13 @@ class SAECollabDDQN:
         self.grad_clip = grad_clip
         self.min_replay_size = min_replay_size
 
-        self.replay = ReplayBuffer(capacity=buffer_size)
+        # self.replay = ReplayBuffer(capacity=buffer_size)
+        self.replay = FastReplayBuffer(capacity=buffer_size,
+                                        state_shape=(self.state_size,),
+                                        storage_device="cpu",
+                                        pin_memory=torch.cuda.is_available(),
+                                        dtype=torch.float32
+                                        )
 
     def compile(self):
         if torch.__version__ >= "2.0" and self.device.type == "cuda":
@@ -366,7 +492,6 @@ class SAECollabDDQN:
             return rand.randrange(self.action_size)
 
         with torch.no_grad():
-            # Skip allocation if already a GPU tensor
             if isinstance(state, torch.Tensor):
                 s = state if state.device == self.device else state.to(self.device, non_blocking=True)
             else:
@@ -380,7 +505,7 @@ class SAECollabDDQN:
 
     def remember(self, state, action, reward, next_state, done):
         self.replay.push(state, action, reward, next_state, done)
-        self.learn_steps += 1
+        self.learn_steps += 1  # FIX: only incremented here, never inside learn()
         if self.learn_steps % self.learn_interval == 0:
             self.learn()
 
@@ -397,7 +522,7 @@ class SAECollabDDQN:
             accelerate_factor=accelerate_factor, is_k_trainable=is_k_trainable,
             use_bias=use_bias
         )
-        self.target_net.add_layer(  # sincroniza target sem deepcopy!
+        self.target_net.add_layer(
             layer_hidden_size, self.action_size, extra_dim=layer_extra_size, k=k,
             mutation_mode=mutation_mode, target_fn=target_fn, eta=eta,
             eta_increment=eta_increment, hidden_activation=hidden_activation,
@@ -416,50 +541,48 @@ class SAECollabDDQN:
         if len(self.replay) < self.min_replay_size:
             return
 
-        batch = self.replay.sample(self.batch_size)
+        states_t, actions_t, rewards_t, next_states_t, dones_t = \
+        self.replay.sample(self.batch_size, device=self.device, non_blocking=True)
 
-        states_t      = torch.from_numpy(np.stack(batch.state)).to(self.device, non_blocking=True)
-        next_states_t = torch.from_numpy(np.stack(batch.next_state)).to(self.device, non_blocking=True)
-
-        actions = np.array(batch.action, dtype=np.int64)
-        rewards = np.array(batch.reward, dtype=np.float32)
-        dones = np.array(batch.done, dtype=np.uint8)
-
-        actions_t = torch.from_numpy(actions).long().to(self.device, non_blocking=True)
-        rewards_t = torch.from_numpy(rewards).float().to(self.device, non_blocking=True)
-        dones_t = torch.from_numpy(dones).float().to(self.device, non_blocking=True)
-
+        # ensure dtypes
+        actions_t = actions_t.long()
+        rewards_t = rewards_t.float()
+        dones_t = dones_t.float()
+        
         if self.use_amp:
+            # FIX: only forward passes under autocast; loss computed in fp32
+            # outside the context to prevent fp16 FTZ underflow → 0.0 loss.
             with autocast("cuda"):
                 q_values_all, _, _ = self.policy_net(states_t)
                 q_values = q_values_all.gather(1, actions_t.unsqueeze(1)).squeeze(1)
-
                 with torch.no_grad():
                     next_q_values_all, _, _ = self.policy_net(next_states_t)
                     next_actions = next_q_values_all.argmax(1)
                     target_next_q_all, _, _ = self.target_net(next_states_t)
-                    next_q = target_next_q_all.gather(1, next_actions.unsqueeze(1)).squeeze(1)
+                    next_q   = target_next_q_all.gather(1, next_actions.unsqueeze(1)).squeeze(1)
                     target_q = rewards_t + self.gamma * next_q * (1.0 - dones_t)
 
-                loss = self.loss_fn(q_values, target_q)
+            # fp32 loss — outside autocast
+            loss = self.loss_fn(q_values.float(), target_q.float())
+            self.loss = loss.item()
+
+            self.optimizer.zero_grad()
+            self.scaler.scale(loss).backward()
+            self.scaler.unscale_(self.optimizer)
         else:
             q_values_all, _, _ = self.policy_net(states_t)
             q_values = q_values_all.gather(1, actions_t.unsqueeze(1)).squeeze(1)
-
             with torch.no_grad():
                 next_q_values_all, _, _ = self.policy_net(next_states_t)
                 next_actions = next_q_values_all.argmax(1)
                 target_next_q_all, _, _ = self.target_net(next_states_t)
-                next_q = target_next_q_all.gather(1, next_actions.unsqueeze(1)).squeeze(1)
+                next_q   = target_next_q_all.gather(1, next_actions.unsqueeze(1)).squeeze(1)
                 target_q = rewards_t + self.gamma * next_q * (1.0 - dones_t)
 
             loss = self.loss_fn(q_values, target_q)
+            self.loss = loss.item()  # FIX: store scalar, not tensor
 
-        self.optimizer.zero_grad()
-        if self.use_amp:
-            self.scaler.scale(loss).backward()
-            self.scaler.unscale_(self.optimizer)
-        else:
+            self.optimizer.zero_grad()
             loss.backward()
 
         torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), self.grad_clip)
@@ -470,7 +593,7 @@ class SAECollabDDQN:
         else:
             self.optimizer.step()
 
-        self.learn_steps += 1
+        # FIX: learn_steps is NOT incremented here — only in remember()
 
         # Polyak (ou hard update)
         if self.tau and self.tau > 0:
@@ -486,32 +609,25 @@ class SAECollabDDQN:
             torch.save(self.target_net, path_target)
     
     def load(self, path_policy:str, path_target:str=None):
-        self.policy_net = torch.load(path_policy, map_location=self.device,weights_only=False)
+        self.policy_net = torch.load(path_policy, map_location=self.device, weights_only=False)
         if path_target:
-            self.target_net = torch.load(path_target, map_location=self.device,weights_only=False)
+            self.target_net = torch.load(path_target, map_location=self.device, weights_only=False)
         else:
             self.target_net = copy.deepcopy(self.policy_net).to(self.device)
         self.target_net.eval()
     
-    def __call__(self, state):
-        if not isinstance(state, torch.Tensor):
-            state = torch.tensor(state, dtype=torch.float32).to(self.device)
-        
-        # Ensure state has batch dimension
+    def __call__(self, state, return_numpy: bool = False):
+        if not torch.is_tensor(state):
+            state = torch.as_tensor(state, dtype=torch.float32, device=self.device)
+        else:
+            if state.device != self.device:
+                state = state.to(self.device, non_blocking=True)
         if state.ndim == 1:
             state = state.unsqueeze(0)
-            squeeze_output = True
-        else:
-            squeeze_output = False
-        
-        # FIX: Unpack tuple and return only q-values
-        q_values, _, _ = self.policy_net(state)
-        
-        # Remove batch dimension if input was single state
-        if squeeze_output:
-            q_values = q_values.squeeze(0)
-        
-        return q_values.detach().cpu()
+        out = self.policy_net(state).detach()
+        if return_numpy:
+            return out.cpu().numpy()
+        return out
     
 class ReservedSAECollabDDQN:
     def __init__(self,
@@ -535,9 +651,16 @@ class ReservedSAECollabDDQN:
                  min_replay_size: int = 1000,
                  use_bias: LayersConfig = None):
 
-        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        if device is None:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = torch.device(device)
+
+        if self.device.type == "cuda" and not torch.cuda.is_available():
+            self.device = torch.device("cpu")
         self.state_size = state_size
         self.action_size = action_size
+        self.loss = 0.0  # FIX: initialise so hasattr() always finds it
 
         self.use_amp = self.device.type == "cuda"
         self.scaler = GradScaler() if self.use_amp else None
@@ -551,7 +674,6 @@ class ReservedSAECollabDDQN:
         self.target_net = copy.deepcopy(self.policy_net).to(self.device)
         self.target_net.eval()
 
-        # LR por camada (mantido)
         if isinstance(lr, float):
             self.lr = [lr] * len(reserved_layers_cfg)
         else:
@@ -579,7 +701,13 @@ class ReservedSAECollabDDQN:
         self.grad_clip = grad_clip
         self.min_replay_size = min_replay_size
 
-        self.replay = ReplayBuffer(capacity=buffer_size)
+        # self.replay = ReplayBuffer(capacity=buffer_size)
+        self.replay = FastReplayBuffer(capacity=buffer_size,
+                                        state_shape=(self.state_size,),
+                                        storage_device="cpu",
+                                        pin_memory=torch.cuda.is_available(),
+                                        dtype=torch.float32
+                                        )
 
     def compile(self):
         if torch.__version__ >= "2.0" and self.device.type == "cuda":
@@ -605,7 +733,6 @@ class ReservedSAECollabDDQN:
             return rand.randrange(self.action_size)
 
         with torch.no_grad():
-            # Skip allocation if already a GPU tensor
             if isinstance(state, torch.Tensor):
                 s = state if state.device == self.device else state.to(self.device, non_blocking=True)
             else:
@@ -619,7 +746,7 @@ class ReservedSAECollabDDQN:
 
     def remember(self, state, action, reward, next_state, done):
         self.replay.push(state, action, reward, next_state, done)
-        self.learn_steps += 1
+        self.learn_steps += 1  # FIX: only incremented here, never inside learn()
         if self.learn_steps % self.learn_interval == 0:
             self.learn()
 
@@ -633,50 +760,48 @@ class ReservedSAECollabDDQN:
         if len(self.replay) < self.min_replay_size:
             return
 
-        batch = self.replay.sample(self.batch_size)
+        states_t, actions_t, rewards_t, next_states_t, dones_t = \
+        self.replay.sample(self.batch_size, device=self.device, non_blocking=True)
 
-        states_t     = torch.from_numpy(np.stack(batch.state)).to(self.device, non_blocking=True)
-        next_states_t = torch.from_numpy(np.stack(batch.next_state)).to(self.device, non_blocking=True)
-        
-        actions = np.array(batch.action, dtype=np.int64)
-        rewards = np.array(batch.reward, dtype=np.float32)
-        dones = np.array(batch.done, dtype=np.uint8)
-
-        actions_t = torch.from_numpy(actions).long().to(self.device, non_blocking=True)
-        rewards_t = torch.from_numpy(rewards).float().to(self.device, non_blocking=True)
-        dones_t = torch.from_numpy(dones).float().to(self.device, non_blocking=True)
+        # ensure dtypes
+        actions_t = actions_t.long()
+        rewards_t = rewards_t.float()
+        dones_t = dones_t.float()
 
         if self.use_amp:
+            # FIX: only forward passes under autocast; loss computed in fp32
+            # outside the context to prevent fp16 FTZ underflow → 0.0 loss.
             with autocast("cuda"):
                 q_values_all, _, _ = self.policy_net(states_t)
                 q_values = q_values_all.gather(1, actions_t.unsqueeze(1)).squeeze(1)
-
                 with torch.no_grad():
                     next_q_values_all, _, _ = self.policy_net(next_states_t)
                     next_actions = next_q_values_all.argmax(1)
                     target_next_q_all, _, _ = self.target_net(next_states_t)
-                    next_q = target_next_q_all.gather(1, next_actions.unsqueeze(1)).squeeze(1)
+                    next_q   = target_next_q_all.gather(1, next_actions.unsqueeze(1)).squeeze(1)
                     target_q = rewards_t + self.gamma * next_q * (1.0 - dones_t)
 
-                loss = self.loss_fn(q_values, target_q)
+            # fp32 loss — outside autocast
+            loss = self.loss_fn(q_values.float(), target_q.float())
+            self.loss = loss.item()
+
+            self.optimizer.zero_grad()
+            self.scaler.scale(loss).backward()
+            self.scaler.unscale_(self.optimizer)
         else:
             q_values_all, _, _ = self.policy_net(states_t)
             q_values = q_values_all.gather(1, actions_t.unsqueeze(1)).squeeze(1)
-
             with torch.no_grad():
                 next_q_values_all, _, _ = self.policy_net(next_states_t)
                 next_actions = next_q_values_all.argmax(1)
                 target_next_q_all, _, _ = self.target_net(next_states_t)
-                next_q = target_next_q_all.gather(1, next_actions.unsqueeze(1)).squeeze(1)
+                next_q   = target_next_q_all.gather(1, next_actions.unsqueeze(1)).squeeze(1)
                 target_q = rewards_t + self.gamma * next_q * (1.0 - dones_t)
 
             loss = self.loss_fn(q_values, target_q)
+            self.loss = loss.item()  # FIX: store scalar, not tensor
 
-        self.optimizer.zero_grad()
-        if self.use_amp:
-            self.scaler.scale(loss).backward()
-            self.scaler.unscale_(self.optimizer)
-        else:
+            self.optimizer.zero_grad()
             loss.backward()
 
         torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), self.grad_clip)
@@ -687,9 +812,9 @@ class ReservedSAECollabDDQN:
         else:
             self.optimizer.step()
 
-        self.learn_steps += 1
+        # FIX: learn_steps is NOT incremented here — only in remember()
 
-        # Polyak apenas nas camadas ativas (otimizado)
+        # Polyak apenas nas camadas ativas
         if self.tau and self.tau > 0:
             active_head = self.policy_net.active_head
             policy_params = [p for layer in self.policy_net.layers[:active_head + 1] for p in layer.parameters()]
@@ -707,29 +832,22 @@ class ReservedSAECollabDDQN:
             torch.save(self.target_net, path_target)
     
     def load(self, path_policy:str, path_target:str=None):
-        self.policy_net = torch.load(path_policy, map_location=self.device,weights_only=False)
+        self.policy_net = torch.load(path_policy, map_location=self.device, weights_only=False)
         if path_target:
-            self.target_net = torch.load(path_target, map_location=self.device,weights_only=False)
+            self.target_net = torch.load(path_target, map_location=self.device, weights_only=False)
         else:
             self.target_net = copy.deepcopy(self.policy_net).to(self.device)
         self.target_net.eval()
     
-    def __call__(self, state):
-        if not isinstance(state, torch.Tensor):
-            state = torch.tensor(state, dtype=torch.float32).to(self.device)
-        
-        # Ensure state has batch dimension
+    def __call__(self, state, return_numpy: bool = False):
+        if not torch.is_tensor(state):
+            state = torch.as_tensor(state, dtype=torch.float32, device=self.device)
+        else:
+            if state.device != self.device:
+                state = state.to(self.device, non_blocking=True)
         if state.ndim == 1:
             state = state.unsqueeze(0)
-            squeeze_output = True
-        else:
-            squeeze_output = False
-        
-        # FIX: Unpack tuple and return only q-values
-        q_values, _, _ = self.policy_net(state)
-        
-        # Remove batch dimension if input was single state
-        if squeeze_output:
-            q_values = q_values.squeeze(0)
-        
-        return q_values.detach().cpu()
+        out = self.policy_net(state).detach()
+        if return_numpy:
+            return out.cpu().numpy()
+        return out
