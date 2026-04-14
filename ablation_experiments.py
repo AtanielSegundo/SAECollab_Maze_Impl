@@ -5,13 +5,11 @@ import threading
 import multiprocessing
 multiprocessing.set_start_method("spawn", force=True)
 
-from datetime import datetime, timedelta
 from typing import *
 from os.path import basename
 from Ablation import *
 from models.QModels import exp_decay_factor_to,TorchDDQN, \
                            SAECollabDDQN,ReservedSAECollabDDQN,NewLayerCfg
-from models.AStar import a_star_maze_solve
 
 from env.MazeEnv import MazeEnv
 from env.MazeWrapper import StateEncoder, MazeGymWrapper
@@ -20,7 +18,7 @@ from env.CPUMazeWrapper import CPUMazeWrapperAdapter
 from env.MazeWrapper import MazeGymWrapper
 
 from functools import reduce
-from collections import deque
+from pathlib import Path
 import torch.nn as nn
 import numpy as np
 import time
@@ -253,7 +251,8 @@ def train_saecollab_tolerance_model(
     mode_type:LayerModeType,
     mutation_mode:MutationMode,
     runs:int,
-    verbose:bool = True
+    verbose:bool = True,
+    early_stop_episodes:int = 0
 ):  
     if os.path.exists(save_path):
         return None
@@ -284,6 +283,8 @@ def train_saecollab_tolerance_model(
     episodes_since_last_branch = 0
     # Check if the goal at least once was reached
     goal_once_reached = False
+    window_goal_count = 0
+    consecutive_perfect = 0
 
     for episode in range(hp.episodes):
         epoch_start_time = time.perf_counter()
@@ -314,24 +315,15 @@ def train_saecollab_tolerance_model(
         
         agent.policy_net.step_all_etas()
         agent.update_epsilon()
+        loss_val = float(agent.loss)
 
-        # Convert loss to Python float, handling CUDA tensors
-        if hasattr(agent, 'loss'):
-            if isinstance(agent.loss, torch.Tensor):
-                loss_val = agent.loss.item()
-            else:
-                loss_val = float(agent.loss) if agent.loss is not None else 0.0
-        else:
-            loss_val = 0.0
-
-        # Succes Rate Calculation
+        # Incremental rolling window success rate — O(1) per episode
+        window_goal_count += int(goal_reached[episode])
         success_rate = 0.0
         if episode >= hp.rolling_window_size:
-            start_idx = max(0, episode - hp.rolling_window_size + 1)
-            recent_window = goal_reached[start_idx: episode + 1]
-            recent_goals = int(np.sum(recent_window))
-            success_rate = (recent_goals / hp.rolling_window_size) * 100
-        
+            window_goal_count -= int(goal_reached[episode - hp.rolling_window_size])
+            success_rate = (window_goal_count / hp.rolling_window_size) * 100
+
         # New Branch Adding Logic
         episodes_since_last_branch += 1
         if (episode >= hp.insert_patience and
@@ -387,11 +379,18 @@ def train_saecollab_tolerance_model(
         agent_metrics.append(episode,cum_reward,cum_goals,success_rate,
                              loss_val,cum_steps,parameters_cnt,
                              delta_time,current_branch
-                             )        
+                             )
 
-        #if episode % 50 == 0:
-        #    agent_metrics.pretty_print(5)
-
+        # Early stopping: sustained 100% success rate
+        if early_stop_episodes > 0:
+            if success_rate >= 100.0:
+                consecutive_perfect += 1
+                if consecutive_perfect >= early_stop_episodes:
+                    if verbose:
+                        print(f"[INFO] Early stop at episode {episode} (100% for {early_stop_episodes} ep)")
+                    break
+            else:
+                consecutive_perfect = 0
 
     agent.save(save_path)
 
@@ -407,7 +406,8 @@ def train_reserved_saecollab_tolerance_model(
     mode_type:LayerModeType,
     mutation_mode:MutationMode,
     runs:int,
-    verbose:bool = True
+    verbose:bool = True,
+    early_stop_episodes:int = 0
 ):  
     if os.path.exists(save_path):
         return None
@@ -481,6 +481,8 @@ def train_reserved_saecollab_tolerance_model(
     deterministic_reached      = False
     episodes_since_last_branch = 0
     goal_once_reached          = False
+    window_goal_count          = 0
+    consecutive_perfect        = 0
 
     for episode in range(hp.episodes):
         epoch_start_time = time.perf_counter()
@@ -511,22 +513,14 @@ def train_reserved_saecollab_tolerance_model(
 
         agent.policy_net.step_all_etas()
         agent.update_epsilon()
+        loss_val = float(agent.loss)
 
-        if hasattr(agent, 'loss'):
-            if isinstance(agent.loss, torch.Tensor):
-                loss_val = agent.loss.item()
-            else:
-                loss_val = float(agent.loss) if agent.loss is not None else 0.0
-        else:
-            loss_val = 0.0
-
-        # Success Rate Calculation
+        # Incremental rolling window success rate — O(1) per episode
+        window_goal_count += int(goal_reached[episode])
         success_rate = 0.0
         if episode >= hp.rolling_window_size:
-            start_idx     = max(0, episode - hp.rolling_window_size + 1)
-            recent_window = goal_reached[start_idx: episode + 1]
-            recent_goals  = int(np.sum(recent_window))
-            success_rate  = (recent_goals / hp.rolling_window_size) * 100
+            window_goal_count -= int(goal_reached[episode - hp.rolling_window_size])
+            success_rate = (window_goal_count / hp.rolling_window_size) * 100
 
         # New Branch Logic — same tolerance criteria, but uses use_next_layer()
         episodes_since_last_branch += 1
@@ -574,6 +568,17 @@ def train_reserved_saecollab_tolerance_model(
         agent_metrics.append(episode, cum_reward, cum_goals, success_rate,
                              loss_val, cum_steps, parameters_cnt,
                              delta_time, current_branch)
+
+        # Early stopping: sustained 100% success rate
+        if early_stop_episodes > 0:
+            if success_rate >= 100.0:
+                consecutive_perfect += 1
+                if consecutive_perfect >= early_stop_episodes:
+                    if verbose:
+                        print(f"[INFO] Early stop at episode {episode} (100% for {early_stop_episodes} ep)")
+                    break
+            else:
+                consecutive_perfect = 0
 
     agent.save(save_path)
     return agent_metrics
@@ -703,7 +708,8 @@ def train_baseline_dense_model(
     mode_type:LayerModeType,
     mutation_mode:MutationMode,
     runs:int,
-    verbose:bool = True
+    verbose:bool = True,
+    early_stop_episodes:int = 0
 ):
     if os.path.exists(save_path):
         return None
@@ -743,8 +749,10 @@ def train_baseline_dense_model(
     
     agent_metrics = ModelTrainMetrics()
     cum_goals     = 0
-    goal_reached  = np.zeros((hp.episodes),dtype=bool) 
-    
+    goal_reached  = np.zeros((hp.episodes),dtype=bool)
+    window_goal_count = 0
+    consecutive_perfect = 0
+
     for episode in range(hp.episodes):
         epoch_start_time = time.perf_counter()
         cum_reward = 0.0
@@ -772,51 +780,54 @@ def train_baseline_dense_model(
                 break
         
         agent.update_epsilon()
+        loss_val = float(agent.loss)
 
-        # Convert loss to Python float, handling CUDA tensors
-        if hasattr(agent, 'loss'):
-            if isinstance(agent.loss, torch.Tensor):
-                loss_val = agent.loss.item()
-            else:
-                loss_val = float(agent.loss) if agent.loss is not None else 0.0
-        else:
-            loss_val = 0.0
-
-        # Succes Rate Calculation
+        # Incremental rolling window success rate — O(1) per episode
+        window_goal_count += int(goal_reached[episode])
         success_rate = 0.0
         if episode >= hp.rolling_window_size:
-            start_idx = max(0, episode - hp.rolling_window_size + 1)
-            recent_window = goal_reached[start_idx: episode + 1]
-            recent_goals = int(np.sum(recent_window))
-            success_rate = (recent_goals / hp.rolling_window_size) * 100
+            window_goal_count -= int(goal_reached[episode - hp.rolling_window_size])
+            success_rate = (window_goal_count / hp.rolling_window_size) * 100
 
         delta_time = time.perf_counter() - epoch_start_time
         agent_metrics.append(episode,cum_reward,cum_goals,
                              success_rate,loss_val,cum_steps,
                              parameters_cnt,delta_time,model_arch.max_layers)
 
-        #if episode % 50 == 0:
-        #    agent_metrics.pretty_print(5)
+        # Early stopping: sustained 100% success rate
+        if early_stop_episodes > 0:
+            if success_rate >= 100.0:
+                consecutive_perfect += 1
+                if consecutive_perfect >= early_stop_episodes:
+                    if verbose:
+                        print(f"[INFO] Early stop at episode {episode} (100% for {early_stop_episodes} ep)")
+                    break
+            else:
+                consecutive_perfect = 0
 
     agent.save(save_path)
 
     return agent_metrics
 
+_TEMP_BASELINE_CACHE_DIR = "./TEMP_TEMP_BASELINE_CACHE_DIR/"
+
 def train_thread(
-        maze_path:    str,
-        model_path:   str,
-        metrics_path: str,
-        train_fn:     str,
-        train_tag:    str,
-        hp:           GlobalHyperparameters,
-        state_repr:   StateRepresentation,
+        maze_path    : str,
+        model_path   : str,
+        metrics_path : str,
+        train_fn     : str,
+        train_tag    : str,
+        hp           : GlobalHyperparameters,
+        state_repr   : StateRepresentation,
         concrete_arch: List[LayersConfig],
-        model_arch:   ModelArch,
-        mode_type:    LayerModeType,
+        model_arch   : ModelArch,
+        mode_type    : LayerModeType,
         mutation_mode: MutationMode,
-        runs:         int,
-        verbose:      bool = True,
-        maze_wrapper = GPUMazeWrapper
+        runs         : int,
+        verbose      : bool = True,
+        maze_wrapper = GPUMazeWrapper,
+        early_stop_episodes: int = 0,
+        insertion_type = None
 ):
     _FN_REGISTRY = {
         "train_reserved_saecollab_tolerance_model": train_reserved_saecollab_tolerance_model,
@@ -840,9 +851,40 @@ def train_thread(
         gym_env = maze_wrapper(maze_env, **state_repr.opts)
         env     = CPUMazeWrapperAdapter(gym_env, device=device)
 
+    should_cache_current_model_and_metrics = False
+    cached_baseline_path = None
+    if train_fn == "train_baseline_dense_model" and insertion_type is not None:
+        import shutil, filelock
+        maze_tag      = basename(maze_path).split(".")[0]
+        cached_baseline_path: Path = Path(_TEMP_BASELINE_CACHE_DIR) / maze_tag / state_repr.tag / model_arch.tag / insertion_type.tag
+        lock_path = str(cached_baseline_path) + ".lock"
+        os.makedirs(cached_baseline_path.parent, exist_ok=True)
+        lock = filelock.FileLock(lock_path, timeout=7200)
+
+        with lock:
+            cached_model   = cached_baseline_path / "model.pth"
+            cached_metrics = cached_baseline_path / "metrics.csv"
+            if cached_model.exists() and cached_metrics.exists():
+                # Cache hit — copy and skip training
+                dest_dir = Path(metrics_path).parent
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(cached_model),   str(dest_dir / "model.pth"))
+                shutil.copy2(str(cached_metrics), str(dest_dir / "metrics.csv"))
+                if verbose:
+                    print(f"[CACHE HIT] Copied baseline from {cached_baseline_path} -> {dest_dir}")
+
+                del env
+                import gc; gc.collect()
+                torch.cuda.empty_cache()
+                return None
+
+            # Cache miss — this worker trains and populates the cache
+            should_cache_current_model_and_metrics = True
+
     metrics = fn(
         model_path, env, model_arch, concrete_arch,
-        hp, mode_type, mutation_mode, runs, verbose
+        hp, mode_type, mutation_mode, runs, verbose,
+        early_stop_episodes
     )
 
     if metrics:
@@ -850,7 +892,18 @@ def train_thread(
 
     if verbose:
         print(f"[{train_tag}] Training Complete")
-    
+
+    if cached_baseline_path and should_cache_current_model_and_metrics:
+        import shutil, filelock
+        lock_path = str(cached_baseline_path) + ".lock"
+        lock = filelock.FileLock(lock_path, timeout=7200)
+        with lock:
+            cached_baseline_path.mkdir(parents=True, exist_ok=True)
+            if Path(model_path).exists():
+                shutil.copy2(str(model_path), str(cached_baseline_path / "model.pth"))
+            if Path(metrics_path).exists():
+                shutil.copy2(str(metrics_path), str(cached_baseline_path / "metrics.csv"))
+
     del env
     del metrics
     import gc
@@ -1255,6 +1308,8 @@ def fast_experiment_1(
     seed = seed or 333
     set_seed(seed)
 
+    os.makedirs(_TEMP_BASELINE_CACHE_DIR,exist_ok=True)
+
     state = AblationProgramState.load_from_json(dir_path, seed)
     if state is None:
         state = AblationProgramState(TABULAR_QLEARNING_PATH, dir_path, seed)
@@ -1262,9 +1317,9 @@ def fast_experiment_1(
 
     # ── Experiment configuration ──────────────────────────────────────────
     MAZES = [
+        "./mazes/big_eg.maze",
         "./mazes/small_eg.maze",
         "./mazes/medium_eg.maze",
-        "./mazes/big_eg.maze",
     ]
 
     STATE_REPRESENTATIONS = [
@@ -1300,7 +1355,7 @@ def fast_experiment_1(
         MAX_STEPS = int(len(list(Action)) * maze_env.opens_count)
         LEARN_STEPS = 4
         if isinstance(learns_by_epochs,int):
-            LEARN_STEPS = max(LEARN_STEPS,np.ceil(MAX_STEPS / learns_by_epochs))
+            LEARN_STEPS = np.ceil(MAX_STEPS / learns_by_epochs)
             LEARN_STEPS = int(LEARN_STEPS)
     
         print(f"[INFO] {basename(maze_path)}: MAX_STEPS = {MAX_STEPS}, LEARN_STEPS = {LEARN_STEPS}")
@@ -1384,6 +1439,7 @@ def fast_experiment_1(
                                     "runs"         : 1,
                                     "verbose"      : False,
                                     "maze_wrapper" : maze_wrapper,
+                                    "insertion_type" : insertion_type
                                 })
 
     total = len(all_jobs)
@@ -1478,4 +1534,336 @@ def fast_experiment_1(
     print(f"  Avg/job    : {fmt_time(total_time / total) if total else '—'}")
     print("=" * 72)
 
-SELECTABLE_EXPERIMENTS = [experiment_1,fast_experiment_1]
+    import shutil
+    print(f"[INFO] Deleting Cache Folder: {_TEMP_BASELINE_CACHE_DIR}")
+    try:
+        shutil.rmtree(_TEMP_BASELINE_CACHE_DIR)
+    except Exception as e:
+        print(f"[ERROR] {e}")
+
+
+def fast_experiment_2(
+    dir_path: str = None,
+    seed=None,
+    TABULAR_QLEARNING_PATH="./c_qlearning/build/agentTrain.exe",
+    max_workers=6,
+    learns_by_epochs=None,
+    maze_wrapper=GPUMazeWrapper,
+    early_stop_episodes=60,
+    **kwargs,
+):
+    """
+    Optimized experiment runner over fast_experiment_1:
+      - Baseline deduplication: baselines depend on (maze, repr, arch, insertion_type)
+        but NOT on (layer_mode, mutation_mode). Trains each unique baseline once,
+        then copies results to all duplicate locations. Cuts ~46% of total jobs.
+      - Early stopping enabled by default (100% success for 60 consecutive episodes).
+    """
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    from collections import deque
+    import sys
+    import traceback
+    import shutil
+
+    dir_path = dir_path or "experiment_1"
+    seed = seed or 333
+    set_seed(seed)
+
+    state = AblationProgramState.load_from_json(dir_path, seed)
+    if state is None:
+        state = AblationProgramState(TABULAR_QLEARNING_PATH, dir_path, seed)
+        state.env_update()
+
+    # ── Experiment configuration (same as fast_experiment_1) ──────────────
+    MAZES = [
+        "./mazes/big_eg.maze",
+        "./mazes/medium_eg.maze",
+        "./mazes/small_eg.maze",
+    ]
+
+    STATE_REPRESENTATIONS = [
+        StateRepresentation(state_encoder=StateEncoder.ONE_HOT),
+        StateRepresentation(state_encoder=StateEncoder.COORDS, possible_actions_feature=True),
+        StateRepresentation(state_encoder=StateEncoder.COORDS_NORM, num_last_states=2, visited_count=True),
+        StateRepresentation(state_encoder=StateEncoder.ONE_HOT, possible_actions_feature=True),
+    ]
+
+
+    '''
+    Tabela Q = R * C * A
+    Arquitetura Rede Neural por camada = (R * C * A) / K
+    
+    
+    '''
+
+    N_MAX_LAYERS = 4
+    width_delta = 1 / N_MAX_LAYERS
+    ARCHITECTURES = [
+        ModelArch(N_MAX_LAYERS, LayersConfig(1/2, 1, 1/2), LayersConfig(width_delta, 1, width_delta), LayersConfig(nn.ReLU, nn.Identity, nn.ReLU),     LayersConfig(True,  True, True)),
+        ModelArch(N_MAX_LAYERS, LayersConfig(1/2, 1, 1/4), LayersConfig(width_delta, 1, width_delta), LayersConfig(nn.ReLU, nn.Identity, nn.Identity), LayersConfig(True,  True, True)),
+        ModelArch(N_MAX_LAYERS, LayersConfig(1/4, 1, 1/4), LayersConfig(width_delta, 1, width_delta), LayersConfig(nn.ReLU, nn.Identity, nn.Identity), LayersConfig(False, True, False)),
+        ModelArch(N_MAX_LAYERS, LayersConfig(1/4, 1, 1/2), LayersConfig(width_delta, 1, width_delta), LayersConfig(nn.ReLU, nn.Identity, nn.ReLU),     LayersConfig(False, True, False)),
+    ]
+
+    INSERTION_TYPES = list(LayerInsertionType)
+    LAYER_MODES     = list(LayerModeType)[::-1]
+    MUTATION_MODES  = list(MutationMode)
+
+    # ── Step 1: tabular baselines + hp per maze ──────────────────────────
+    maze_configs = {}
+    for maze_path in MAZES:
+        maze_env  = MazeEnv(maze_path, rewards_scaled=False, pass_through_walls=False)
+        EPISODES  = 400
+        MAX_STEPS = int(len(list(Action)) * maze_env.opens_count)
+        LEARN_STEPS = 4
+        if isinstance(learns_by_epochs, int):
+            LEARN_STEPS = int(np.ceil(MAX_STEPS / learns_by_epochs))
+
+        print(f"[INFO] {basename(maze_path)}: MAX_STEPS = {MAX_STEPS}, LEARN_STEPS = {LEARN_STEPS}")
+
+        epsilon_decay = exp_decay_factor_to(
+            final_epsilon=0.1,
+            final_step=MAX_STEPS * EPISODES,
+            epsilon_start=1.0,
+            convergence_threshold=0.01,
+        )
+
+        hp = GlobalHyperparameters(
+            learning_rate           = 1e-5,
+            new_layer_learning_rate = 5e-5,
+            discount_factor         = 0.999,
+            epsilon_decay           = epsilon_decay,
+            episodes                = EPISODES,
+            max_steps               = MAX_STEPS,
+            batch_size              = 1024,
+            steps_learn_interval    = LEARN_STEPS,
+            rolling_window_size     = 20,
+            insert_patience         = 15,
+            insert_min_goals        = 5,
+            insert_min_variance     = 0.6,
+        )
+
+        try:
+            state.train_tabular_agent(maze_path, hp, runs=1)
+        except Exception as e:
+            print(f"[WARNING] Cant Train Tabular Agent: {e}")
+        state.save_a_star_qtable(maze_path)
+        maze_configs[maze_path] = (maze_env, hp)
+
+    # ── Step 2: build job lists with baseline deduplication ───────────────
+    sae_jobs = []
+    baseline_canonical = {}
+    baseline_copies = {}
+
+    for maze_path in MAZES:
+        maze_env, hp = maze_configs[maze_path]
+        maze_tag     = basename(maze_path).split(".")[0]
+
+        for state_representation in STATE_REPRESENTATIONS:
+            gym_env    = MazeGymWrapper(maze_env, **state_representation.opts)
+            base_width = gym_env.action_size * maze_env.rows * maze_env.cols
+
+            for arch in ARCHITECTURES:
+                for insertion_type in INSERTION_TYPES:
+                    concrete_arch = gen_concrete_arch(base_width, gym_env, arch, insertion_type)
+                    baseline_key = (maze_tag, state_representation.tag, arch.tag, insertion_type.tag)
+
+                    for layer_mode in LAYER_MODES:
+                        for mutation_mode in MUTATION_MODES:
+                            save_dir = os.path.join(
+                                dir_path, str(seed),
+                                maze_tag,
+                                state_representation.tag,
+                                arch.tag,
+                                insertion_type.tag,
+                                layer_mode.tag,
+                                str(mutation_mode).split(".")[-1],
+                            )
+                            os.makedirs(save_dir, exist_ok=True)
+
+                            # ── SAE job (always unique per full combo) ────
+                            sae_dir      = os.path.join(save_dir, "sae_tolerance_model")
+                            sae_model    = os.path.join(sae_dir, "model.pth")
+                            sae_metrics  = os.path.join(sae_dir, "metrics.csv")
+                            os.makedirs(sae_dir, exist_ok=True)
+
+                            if not os.path.exists(sae_model):
+                                sae_jobs.append({
+                                    "maze_path"          : maze_path,
+                                    "model_path"         : sae_model,
+                                    "metrics_path"       : sae_metrics,
+                                    "train_fn"           : "train_reserved_saecollab_tolerance_model",
+                                    "train_tag"          : "SAE Tolerance",
+                                    "hp"                 : hp,
+                                    "state_repr"         : state_representation,
+                                    "concrete_arch"      : concrete_arch,
+                                    "model_arch"         : arch,
+                                    "mode_type"          : layer_mode.tag,
+                                    "mutation_mode"      : mutation_mode,
+                                    "runs"               : 1,
+                                    "verbose"            : False,
+                                    "maze_wrapper"       : maze_wrapper,
+                                    "early_stop_episodes": early_stop_episodes,
+                                })
+
+                            # ── Baseline job (deduplicated) ───────────────
+                            dense_dir    = os.path.join(save_dir, "dense_model")
+                            dense_model  = os.path.join(dense_dir, "model.pth")
+                            dense_metrics= os.path.join(dense_dir, "metrics.csv")
+                            os.makedirs(dense_dir, exist_ok=True)
+
+                            if os.path.exists(dense_model):
+                                continue  # already trained from previous run
+
+                            if baseline_key not in baseline_canonical:
+                                # First occurrence → this is the canonical training job
+                                baseline_canonical[baseline_key] = {
+                                    "maze_path"          : maze_path,
+                                    "model_path"         : dense_model,
+                                    "metrics_path"       : dense_metrics,
+                                    "train_fn"           : "train_baseline_dense_model",
+                                    "train_tag"          : "Baseline",
+                                    "hp"                 : hp,
+                                    "state_repr"         : state_representation,
+                                    "concrete_arch"      : concrete_arch,
+                                    "model_arch"         : arch,
+                                    "mode_type"          : layer_mode.tag,
+                                    "mutation_mode"      : mutation_mode,
+                                    "runs"               : 1,
+                                    "verbose"            : False,
+                                    "maze_wrapper"       : maze_wrapper,
+                                    "early_stop_episodes": early_stop_episodes,
+                                }
+                                baseline_copies[baseline_key] = []
+                            else:
+                                # Duplicate → just record where to copy results
+                                baseline_copies[baseline_key].append(dense_dir)
+
+    baseline_jobs = list(baseline_canonical.values())
+    all_jobs = sae_jobs + baseline_jobs
+
+    n_sae      = len(sae_jobs)
+    n_baseline = len(baseline_jobs)
+    n_deduped  = sum(len(v) for v in baseline_copies.values())
+    total      = len(all_jobs)
+
+    print(f"\n[INFO] SAE jobs        : {n_sae}")
+    print(f"[INFO] Baseline jobs     : {n_baseline}")
+    print(f"[INFO] Total jobs        : {total}")
+    print(f"[INFO] Early stop        : {'off' if early_stop_episodes == 0 else f'{early_stop_episodes} ep @ 100%'}")
+    print(f"[INFO] Workers           : {max_workers}")
+    print(f"[INFO] Start             : {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"[INFO] Pre-warming {max_workers} workers (CUDA init + imports)...")
+    print("=" * 72)
+
+    # ── Progress helpers ──────────────────────────────────────────────────
+    WINDOW       = 50
+    finish_times: deque = deque(maxlen=WINDOW)
+
+    def fmt_time(t: float) -> str:
+        h = int(t // 3600)
+        m = int((t % 3600) // 60)
+        s = int(t % 60)
+        if h:
+            return f"{h}h {m:02d}m {s:02d}s"
+        if m:
+            return f"{m}m {s:02d}s"
+        return f"{s}s"
+
+    done       = 0
+    errors     = 0
+    start_time = time.time()
+
+    def print_progress(job: dict, job_elapsed: float, error=None):
+        nonlocal done, errors
+        finish_times.append(time.time())
+
+        if len(finish_times) >= 2:
+            window_span = finish_times[-1] - finish_times[0]
+            rate        = (len(finish_times) - 1) / window_span if window_span > 0 else 0
+            remaining   = total - done
+            eta_str     = fmt_time(remaining / rate) if rate > 0 else "?"
+            rate_str    = f"{rate * 60:.1f} jobs/min"
+        else:
+            eta_str  = "calculating..."
+            rate_str = "—"
+
+        pct      = done / total if total else 0
+        bar_fill = int(40 * pct)
+        bar      = "█" * bar_fill + "░" * (40 - bar_fill)
+        status   = "✓" if error is None else "✗"
+        ts       = time.strftime("%H:%M:%S")
+
+        print(
+            f"[{ts}] {status} [{done:>5}/{total}] ({pct*100:5.1f}%) "
+            f"| took {fmt_time(job_elapsed):<9}| ETA {eta_str} @ {rate_str}"
+        )
+        if error:
+            print(f"  ⚠ {type(error).__name__}: {str(error)[:100]}")
+
+        if done == 1 or done % 10 == 0 or done == total:
+            sep = "─" * 72
+            print(sep)
+            print(f"  Done: {done}/{total}  |  Errors: {errors}")
+            print(f"  [{bar}] {pct*100:.1f}%  |  ETA: {eta_str}  |  {rate_str}")
+            print(f"  Last: {job['model_path']}")
+            print(sep)
+
+        sys.stdout.flush()
+
+    # ── Step 3: submit & run ─────────────────────────────────────────────
+    with ProcessPoolExecutor(max_workers=max_workers, initializer=_warm_worker) as pool:
+        futures = {pool.submit(train_thread, **job): (job, time.time()) for job in all_jobs}
+        print(f"[INFO] All {total} jobs submitted — workers running...\n")
+
+        for future in as_completed(futures):
+            job, submit_time = futures[future]
+            done += 1
+            error = None
+            try:
+                future.result()
+            except Exception as e:
+                error = e
+                errors += 1
+                print("\n----- WORKER ERROR -----")
+                print("JOB:", job["model_path"])
+                print(traceback.format_exc())
+            print_progress(job, time.time() - submit_time, error)
+
+    # ── Step 4: copy deduplicated baseline results ───────────────────────
+    copies_done = 0
+    copies_failed = 0
+    for baseline_key, copy_dirs in baseline_copies.items():
+        canonical = baseline_canonical[baseline_key]
+        src_model   = canonical["model_path"]
+        src_metrics = canonical["metrics_path"]
+
+        if not os.path.exists(src_model):
+            copies_failed += len(copy_dirs)
+            continue
+
+        for dst_dir in copy_dirs:
+            try:
+                dst_model   = os.path.join(dst_dir, "model.pth")
+                dst_metrics = os.path.join(dst_dir, "metrics.csv")
+                os.makedirs(dst_dir, exist_ok=True)
+                shutil.copy2(src_model, dst_model)
+                if os.path.exists(src_metrics):
+                    shutil.copy2(src_metrics, dst_metrics)
+                copies_done += 1
+            except Exception as e:
+                copies_failed += 1
+                print(f"[WARNING] Copy failed for {dst_dir}: {e}")
+
+    total_time = time.time() - start_time
+    print("\n" + "=" * 72)
+    print(f"  ALL JOBS COMPLETE")
+    print(f"  Total trained  : {total}")
+    print(f"  Successful     : {total - errors}")
+    print(f"  Errors         : {errors}")
+    print(f"  Baseline copies: {copies_done} ok, {copies_failed} failed")
+    print(f"  Wall time      : {fmt_time(total_time)}")
+    print(f"  Avg/job        : {fmt_time(total_time / total) if total else '—'}")
+    print("=" * 72)
+
+SELECTABLE_EXPERIMENTS = [experiment_1, fast_experiment_1, fast_experiment_2]

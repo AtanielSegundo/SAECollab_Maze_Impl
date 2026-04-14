@@ -49,8 +49,25 @@ class CompiledTrainMetrics:
         # The Key Array should be like: shape:= [N,2] where 2 = (mean,variance)
         self.comp_metrics = {key: [] for key in metrics_keys}
         self.comp_metrics_count = {key: [] for key in metrics_keys}
-    
+        # Per-run list of episode indices where a branch was inserted.
+        self.branch_insertion_episodes: List[List[int]] = []
+
     def compile_metrics(self, m: ModelTrainMetrics):
+        bii = getattr(m, "branch_inserted_in", None) or []
+        if bii:
+            episodes_list = [i for i, v in enumerate(bii) if v]
+        else:
+            # Fallback: derive from branchs diffs
+            branchs = getattr(m, "branchs", None) or []
+            episodes_list = []
+            prev = 0
+            for i, b in enumerate(branchs):
+                if b > prev:
+                    episodes_list.append(i)
+                prev = b
+        if episodes_list:
+            self.branch_insertion_episodes.append(episodes_list)
+
         for key, compile_arr in self.comp_metrics.items():
             maped_key = m.header_map.get(key, None)
             if maped_key in m.available_metrics:
@@ -89,11 +106,28 @@ class CompiledTrainMetrics:
                         compile_arr[idx] = (new_mean, new_var)
                         self.comp_metrics_count[key][idx] = new_count
     
+    def branch_insertion_stats(self):
+        """Per-insertion-index (mean_episode, std_episode, count) across runs."""
+        if not self.branch_insertion_episodes:
+            return []
+        max_k = max(len(lst) for lst in self.branch_insertion_episodes)
+        stats = []
+        for k in range(max_k):
+            vals = [lst[k] for lst in self.branch_insertion_episodes if len(lst) > k]
+            if not vals:
+                continue
+            arr = np.array(vals, dtype=float)
+            stats.append((float(arr.mean()), float(arr.std()), len(vals)))
+        return stats
+
     def extend(self, other: "CompiledTrainMetrics"):
         """
         Merge another CompiledTrainMetrics into this one,
         combining means/variances/counts correctly.
         """
+        self.branch_insertion_episodes.extend(
+            getattr(other, "branch_insertion_episodes", []) or []
+        )
         for key in self.comp_metrics.keys():
             arr_self = self.comp_metrics[key]
             cnt_self = self.comp_metrics_count[key]
@@ -412,6 +446,29 @@ def plot_compiled_metrics(
                     ax.fill_between(x, lower, upper, alpha=0.12, color=col)
                 plotted_any = True
 
+        # Draw vertical lines on the branchs subplot: mean +/- std of each
+        # insertion-index's episode, across runs.
+        if metric == "branchs":
+            def _draw_insertion_lines(comp, color, label_prefix):
+                if not hasattr(comp, "branch_insertion_stats"):
+                    return
+                stats = comp.branch_insertion_stats()
+                for k, (mu, sigma, _cnt) in enumerate(stats):
+                    ax.axvline(mu, color=color, linestyle=':', linewidth=1.2,
+                               alpha=0.8, label='_nolegend_')
+
+            for i, f in enumerate(f_keys):
+                comp = compiled_metrics.get(f, {}).get(target)
+                if comp is None:
+                    continue
+                col = color_cycle[i % len(color_cycle)] if color_cycle else None
+                _draw_insertion_lines(comp, col, f)
+
+            if extra_metrics:
+                for j, (label, comp) in enumerate(extra_metrics.items()):
+                    col = color_cycle[(len(f_keys) + j) % len(color_cycle)] if color_cycle else None
+                    _draw_insertion_lines(comp, col, label)
+
         ax.set_title(metric)
         ax.set_xlabel("Episode")
         ax.grid(True, alpha=0.3)
@@ -478,8 +535,10 @@ def ablation_traverse(search_base, search_targets, search_filters, plot_save_pat
         for f_key,compiled_metrics_d in compiled_metrics.items():
             all_baselines_compiled.extend(compiled_metrics_d['baseline'])
         
-    x_lim_max = len(all_baselines_compiled.comp_metrics[target_metrics_keys[0]]) if use_baseline else x_max
-    x_lim_max = x_lim_max - 1
+    if use_baseline and len(all_baselines_compiled.comp_metrics[target_metrics_keys[0]]) > 0:
+        x_lim_max = len(all_baselines_compiled.comp_metrics[target_metrics_keys[0]]) - 1
+    else:
+        x_lim_max = x_max
     plot_compiled_metrics(
         compiled_metrics,
         f_keys=list(search_filters.keys()),
@@ -516,6 +575,14 @@ def main(*args, **kwargs):
         return
     
     search_filters = {
+        "Small" : SearchFilter("small_eg"),
+        "Medium": SearchFilter("medium_eg"),
+        "Big"   : SearchFilter("big_eg"),
+    }
+    out_file = 'plots/compared_maps.png'
+    ablation_traverse(search_base,search_targets,search_filters,out_file)
+
+    search_filters = {
         "M1": SearchFilter("M1"),
         "M2": SearchFilter("M2"),
         "M3": SearchFilter("M3"),
@@ -530,14 +597,6 @@ def main(*args, **kwargs):
         "Out"   : SearchFilter("Out"),
     }
     out_file = 'plots/compared_mutations.png'
-    ablation_traverse(search_base,search_targets,search_filters,out_file)
-
-    search_filters = {
-        "Small" : SearchFilter("small_eg"),
-        "Medium": SearchFilter("medium_eg"),
-        "Big"   : SearchFilter("big_eg"),
-    }
-    out_file = 'plots/compared_maps.png'
     ablation_traverse(search_base,search_targets,search_filters,out_file)
 
     search_filters = {
@@ -605,6 +664,12 @@ def main(*args, **kwargs):
 
 if __name__ == "__main__":
     from sys import argv
+    base_path = "./test/333"
+    out_path  = "." 
+    if len(argv) == 2:
+        base_path = argv[-1]
+    if len(argv) == 3:
+        out_path  = argv[-1]
+        base_path = argv[-2]
     
-    base_path = argv[-1] if len(argv) > 1 else "./test/333"
     main(base=base_path)

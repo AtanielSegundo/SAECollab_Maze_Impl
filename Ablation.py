@@ -144,6 +144,21 @@ from dataclasses import dataclass, field, fields
 from typing import List
 
 
+def _derive_branch_inserted_in(existing: List[int], branchs: List[int]) -> List[int]:
+    """If CSV already has branch_inserted_in column (non-empty and non-zero), trust it.
+    Otherwise derive as positive diffs of branchs count per episode."""
+    if existing and any(v for v in existing):
+        return list(existing)
+    if not branchs:
+        return [0] * len(existing)
+    derived = [0] * len(branchs)
+    prev = 0
+    for i, b in enumerate(branchs):
+        derived[i] = 1 if b > prev else 0
+        prev = b
+    return derived
+
+
 @dataclass
 class ModelTrainMetrics:
     episode         : List[int]   = field(default_factory=list)
@@ -155,17 +170,19 @@ class ModelTrainMetrics:
     parameters      : List[int]   = field(default_factory=list)
     delta_time      : List[float] = field(default_factory=list)
     branchs         : List[int]   = field(default_factory=list)
+    branch_inserted_in: List[int] = field(default_factory=list)
 
     type_map = {
-        'episode'         : int,
-        'cumulative_goals': int,
-        'steps'           : int,
-        'parameters'      : int,
-        'reward'          : float,
-        'success_rate'    : float,
-        'loss'            : float,
-        'delta_time'      : float,
-        'branchs'         : int
+        'episode'           : int,
+        'cumulative_goals'  : int,
+        'steps'             : int,
+        'parameters'        : int,
+        'reward'            : float,
+        'success_rate'      : float,
+        'loss'              : float,
+        'delta_time'        : float,
+        'branchs'           : int,
+        'branch_inserted_in': int,
     }
 
     header_map = {
@@ -188,6 +205,8 @@ class ModelTrainMetrics:
         'delta_time'      : 'delta_time',
 
         'branchs'         : 'branchs',
+
+        'branch_inserted_in': 'branch_inserted_in',
     }
 
 
@@ -201,7 +220,8 @@ class ModelTrainMetrics:
             self.steps,
             self.parameters,
             self.delta_time,
-            self.branchs
+            self.branchs,
+            self.branch_inserted_in,
         ]
         
         self.available_metrics = [f.name for f in fields(self.__class__)
@@ -215,11 +235,13 @@ class ModelTrainMetrics:
             self.ordered_metrics[idx].append(args[idx])
 
     def save(self, path: str):
+        n = len(self)
         with open(path, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(self.available_metrics)
-            for idx in range(len(self)):
-                row = [metric[idx] for metric in self.ordered_metrics]
+            for idx in range(n):
+                row = [metric[idx] if idx < len(metric) else 0
+                       for metric in self.ordered_metrics]
                 writer.writerow(row)
 
     @classmethod
@@ -295,7 +317,11 @@ class ModelTrainMetrics:
             parameters=data['parameters'],
             
             delta_time=data.get('delta_time', []),
-            branchs=data.get('branchs',[])
+            branchs=data.get('branchs',[]),
+            branch_inserted_in=_derive_branch_inserted_in(
+                data.get('branch_inserted_in', []),
+                data.get('branchs', []),
+            ),
         )
 
     def __str__(self):
