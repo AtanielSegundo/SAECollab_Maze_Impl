@@ -1,5 +1,9 @@
 from env.MazeEnv import *
 from models.AStar import a_star_maze_solve 
+from env.MazeWrapper import StateEncoder
+
+
+print(str(StateEncoder.COORDS))
 
 env = MazeEnv("../C/c-qlearning/gwyn_1.maze")
 
