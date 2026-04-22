@@ -446,8 +446,6 @@ def plot_compiled_metrics(
                     ax.fill_between(x, lower, upper, alpha=0.12, color=col)
                 plotted_any = True
 
-        # Draw vertical lines on the branchs subplot: mean +/- std of each
-        # insertion-index's episode, across runs.
         if metric == "branchs":
             def _draw_insertion_lines(comp, color, label_prefix):
                 if not hasattr(comp, "branch_insertion_stats"):
@@ -473,7 +471,7 @@ def plot_compiled_metrics(
         ax.set_xlabel("Episode")
         ax.grid(True, alpha=0.3)
         ax.legend()
-        # sensible y-labels for common metrics
+        
         if metric in ("reward",):
             ax.set_ylabel("Cumulative Reward")
         elif metric in ("sucess_rate",):

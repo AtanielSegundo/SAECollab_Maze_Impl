@@ -361,6 +361,7 @@ def train_agent(agent, env, episodes, max_steps, agent_name,
             next_state = next_state.reshape(1, -1)
             agent.remember(state, action, reward, next_state, done)
             state = next_state
+            
             episode_reward += reward
             episode_steps += 1
 

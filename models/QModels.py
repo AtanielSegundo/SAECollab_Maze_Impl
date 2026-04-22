@@ -338,7 +338,7 @@ class TorchDDQN:
             loss = self.loss_fn(q_values.float(), target_q.float())
             self.loss = loss.item()
 
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
             self.scaler.scale(loss).backward()
             self.scaler.unscale_(self.optimizer)
             torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), self.grad_clip)
@@ -354,7 +354,7 @@ class TorchDDQN:
             loss = self.loss_fn(q_values, target_q)
             self.loss = loss.item()  # FIX: store scalar, not tensor
 
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), self.grad_clip)
             self.optimizer.step()
@@ -566,7 +566,7 @@ class SAECollabDDQN:
             loss = self.loss_fn(q_values.float(), target_q.float())
             self.loss = loss.item()
 
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
             self.scaler.scale(loss).backward()
             self.scaler.unscale_(self.optimizer)
         else:
@@ -582,7 +582,7 @@ class SAECollabDDQN:
             loss = self.loss_fn(q_values, target_q)
             self.loss = loss.item()  # FIX: store scalar, not tensor
 
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
 
         torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), self.grad_clip)
@@ -785,7 +785,7 @@ class ReservedSAECollabDDQN:
             loss = self.loss_fn(q_values.float(), target_q.float())
             self.loss = loss.item()
 
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
             self.scaler.scale(loss).backward()
             self.scaler.unscale_(self.optimizer)
         else:
@@ -801,7 +801,7 @@ class ReservedSAECollabDDQN:
             loss = self.loss_fn(q_values, target_q)
             self.loss = loss.item()  # FIX: store scalar, not tensor
 
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
 
         torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), self.grad_clip)

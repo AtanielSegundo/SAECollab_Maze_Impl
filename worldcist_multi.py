@@ -18,11 +18,11 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 
 from env.MazeEnv import *
-from env.MazeWrapper import StateEncoder, MazeGymWrapper
-from models.QModels import SAECollabDDQN, TorchDDQN, exp_decay_factor_to
-from models.AStar import AStarQModel, a_star_maze_solve
-from models.Path import Path, get_best_path
-from models.QTable import genearate_qtable_from_model
+from env.MazeWrapper         import StateEncoder, MazeGymWrapper
+from models.QModels          import SAECollabDDQN, TorchDDQN, exp_decay_factor_to
+from models.AStar            import AStarQModel, a_star_maze_solve
+from models.Path             import Path, get_best_path
+from models.QTable           import genearate_qtable_from_model
 from StackedCollab.collabNet import MutationMode
 
 
@@ -62,7 +62,6 @@ def first_success_episode(history):
             return i + 1
     return None
 
-
 def maybe_percent(series):
     """If series values appear in [0,1], convert to percents."""
     if series is None or len(series) == 0:
@@ -84,7 +83,6 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
     except Exception:
         pass
-
 
 # --------------------
 # Single-run aligned plot (kept for debug)
@@ -226,7 +224,7 @@ def create_baseline_agent(state_size, action_size, max_steps, episodes):
         grad_clip=10.0,
         min_replay_size=2048,
         epsilon_decay=epsilon_decay,
-        target_update=int(TOTAL_STEPS / 50),
+        target_update=int(3 / 50),
         buffer_size=100_000
     )
 
@@ -568,7 +566,7 @@ def plot_comparison_aggregate_with_two(agg_b, agg_s, base_name, episodes, baseli
     # (a) Rewards
     ax1 = fig.add_subplot(gs[0, 0])
     b_mean, b_std = agg_b["rewards_mean"], agg_b["rewards_std"]
-    s_mean, s_std = agg_s["rewards_mean"], agg_s["rewards_std"]
+    s_mean, s_std = agg_s["rewards_mean"], agg_s["rewards_std"] 
     ax1.plot(x, b_mean, color='tab:blue', label='Baseline mean', linewidth=2)
     ax1.fill_between(x, b_mean - b_std, b_mean + b_std, color='tab:blue', alpha=0.2)
     ax1.plot(x, s_mean, color='tab:orange', label='SAE mean', linewidth=2)
@@ -715,11 +713,11 @@ def main():
     env, base_name, raw_env = setup_environment(file_path)
 
     # Parameters
-    EPISODES = 200
-    N_RUNS = 10
-    STATE_SIZE = env.state_size
+    EPISODES    = 200
+    N_RUNS      = 10
+    STATE_SIZE  = env.state_size
     ACTION_SIZE = env.action_size
-    MAX_STEPS = env.maze.opens_count * ACTION_SIZE
+    MAX_STEPS   = env.maze.opens_count * ACTION_SIZE
 
     print(f"[INFO] Experimental Parameters:")
     print(f"  Episodes: {EPISODES}")
