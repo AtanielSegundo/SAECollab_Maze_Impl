@@ -367,11 +367,18 @@ def plot_compiled_metrics(
 
             col = color_cycle[i % len(color_cycle)] if color_cycle else None
             label = f"{f}"
+            
+            if metric == "loss":
+                ax.set_yscale("symlog", linthresh=1e-6)
+
             ax.plot(x, plot_line, label=label, linewidth=1.7, color=col)
 
             # shade unless disabled
             if not disable_variance_shade:
-                lower = means - stds
+                if metric == "loss":
+                    lower = np.clip(means - stds, 1e-8, None) 
+                else:
+                    lower = means - stds
                 upper = means + stds
                 ax.fill_between(x, lower, upper, alpha=0.15, color=col)
 
@@ -441,12 +448,19 @@ def plot_compiled_metrics(
                 else:
                     plot_line = means
 
+                if metric == "loss":
+                    ax.set_yscale("symlog", linthresh=1e-6)
+
                 col = color_cycle[(len(f_keys) + j) % len(color_cycle)] if color_cycle else None
                 ax.plot(x, plot_line, label=label, linestyle='--', linewidth=1.6, color=col)
                 if not disable_variance_shade:
-                    lower = means - stds
+                    if metric == "loss":
+                        lower = np.clip(means - stds, 1e-8, None) 
+                    else:
+                        lower = means - stds
                     upper = means + stds
                     ax.fill_between(x, lower, upper, alpha=0.12, color=col)
+                
                 plotted_any = True
 
         if metric == "branchs":

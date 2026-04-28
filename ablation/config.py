@@ -68,13 +68,17 @@ class ModelArch:
                  width_multipliers      : LayersConfig,   # THE OUT LAYER MULTIPLIER SHOULD BE 1
                  delta_width_multipliers: LayersConfig,
                  activation             : LayersConfig,
-                 use_bias               : LayersConfig
+                 use_bias               : LayersConfig,
+                 is_static              : bool = False,   # Static Architectures have an static number of neurons 
+                                                          # The default case is an factor to multiply by an extern
+                                                          # number of neurons 
                  )         :
         self.max_layers              = max_layers
         self.width_multipliers       = width_multipliers
         self.delta_width_multipliers = delta_width_multipliers
         self.activation              = activation
         self.use_bias                = use_bias
+        self.is_static               = is_static
 
     @property
     def tag(self):

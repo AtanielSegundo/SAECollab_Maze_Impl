@@ -36,9 +36,9 @@ def gen_concrete_arch(
     min_width     : int = 64,
     max_width     : int = 2048,
 ) -> Optional[List[LayersConfig]]:
-
-    base_width = max(min_width, min(max_width, base_width))
-
+    
+    base_width = 1 if architecute.is_static else max(min_width, min(max_width, base_width)) 
+    
     if insertion_type is LayerInsertionType.CNT:
         cnt_hidden = architecute.width_multipliers.hidden * base_width
         cnt_extra  = architecute.width_multipliers.extra  * base_width
@@ -61,8 +61,8 @@ def gen_concrete_arch(
         delta_hidden = architecute.delta_width_multipliers.hidden * crt_hidden
         delta_extra  = architecute.delta_width_multipliers.extra * crt_extra
         for i in range(architecute.max_layers):
-            hidden_size = np.ceil(crt_hidden + i * delta_hidden)
-            extra_size  = np.ceil(crt_extra + i * delta_extra)
+            hidden_size = max(1, np.ceil(crt_hidden + i * delta_hidden))
+            extra_size  = max(0, np.ceil(crt_extra + i * delta_extra))
             concrete_arch.append(
                 LayersConfig(hidden_size,
                              env.action_size,
@@ -77,8 +77,8 @@ def gen_concrete_arch(
         delta_hidden = architecute.delta_width_multipliers.hidden * drt_hidden
         delta_extra  = architecute.delta_width_multipliers.extra * drt_extra
         for i in range(architecute.max_layers):
-            hidden_size = np.ceil(drt_hidden - i * delta_hidden)
-            extra_size  = np.ceil(drt_extra - i * delta_extra)
+            hidden_size = max(1, np.ceil(drt_hidden - i * delta_hidden))
+            extra_size  = max(0, np.ceil(drt_extra - i * delta_extra))
             concrete_arch.append(
                 LayersConfig(hidden_size,
                              env.action_size,
@@ -88,19 +88,21 @@ def gen_concrete_arch(
 
     elif insertion_type is LayerInsertionType.ALT:
         concrete_arch = list()
-        drt_hidden   = architecute.width_multipliers.hidden * base_width
-        drt_extra    = architecute.width_multipliers.extra  * base_width
-        delta_hidden = architecute.delta_width_multipliers.hidden * drt_hidden
-        delta_extra  = architecute.delta_width_multipliers.extra * drt_extra
+        alt_hidden   = architecute.width_multipliers.hidden * base_width
+        alt_extra    = architecute.width_multipliers.extra  * base_width
+        delta_hidden = architecute.delta_width_multipliers.hidden * alt_hidden
+        delta_extra  = architecute.delta_width_multipliers.extra * alt_extra
         sigma = 0.0
         for i in range(architecute.max_layers):
             if i > 0 : sigma = (2.0*np.random.random() - 1.0)
-            drt_hidden += np.ceil(sigma * delta_hidden)
-            drt_extra  += np.ceil(sigma * delta_extra)
+            alt_hidden += np.ceil(sigma * delta_hidden)
+            alt_extra  += np.ceil(sigma * delta_extra)
+            alt_hidden = max(1, alt_hidden)
+            alt_extra  = max(0, alt_extra)
             concrete_arch.append(
-                LayersConfig(drt_hidden,
+                LayersConfig(alt_hidden,
                              env.action_size,
-                             drt_extra)
+                             alt_extra)
             )
         return concrete_arch
 
@@ -111,9 +113,9 @@ def gen_concrete_arch(
 def save_concrete_arch_info(save_dir:str,concrete_arch:List[LayersConfig]):
     concrete_arch_repr = {"arch": [
         {
-            "hidden":layer.hidden,
-            "out":layer.out,
-            "extra":layer.extra
+            "hidden":int(layer.hidden),
+            "out"   :int(layer.out),
+            "extra" :int(layer.extra)
         } for layer in concrete_arch
     ]}
     with open(os.path.join(save_dir,"concrete_arch.json"),"w") as f:
@@ -271,7 +273,9 @@ def train_saecollab_tolerance_model(
 
                if should_add_branch:
                    hidden_size = int(concrete_layer_arch[current_branch].hidden)
-                   extra_size  = int(concrete_layer_arch[current_branch].extra if mode_type.value.use_extra_branch else 0)
+                   extra_size  = int(concrete_layer_arch[current_branch].extra if
+                                     mode_type.value.use_extra_branch else 0)
+                   extra_size  = None if extra_size == 0 else extra_size
                    agent.add_layer(
                        layer_hidden_size=hidden_size,
                        layer_extra_size=extra_size,
@@ -351,6 +355,7 @@ def train_reserved_saecollab_tolerance_model(
     # Remaining layers (reserved but frozen)
     for i in range(1, model_arch.max_layers):
         extra_dim = int(concrete_layer_arch[i].extra) if mode_type.value.use_extra_branch else None
+        extra_dim = None if (extra_dim == 0) else extra_dim
         reserved_layers_cfg.append(NewLayerCfg(
             hidden_dim        = int(concrete_layer_arch[i].hidden),
             out_dim           = env.action_size,
@@ -587,6 +592,7 @@ def train_saecollab_spaced_model(
             else:
                 hidden_size = int(concrete_layer_arch[current_branch].hidden)
                 extra_size  = int(concrete_layer_arch[current_branch].extra if mode_type.value.use_extra_branch else 0)
+                extra_size  = None if extra_size == 0 else extra_size
                 agent.add_layer(
                     layer_hidden_size=hidden_size,
                     layer_extra_size=extra_size,
