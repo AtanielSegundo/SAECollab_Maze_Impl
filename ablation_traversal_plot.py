@@ -95,10 +95,19 @@ def main(*args, **kwargs):
     ablation_traverse(search_base,search_targets,search_filters,out_file)
 
     search_filters = {
-        "COORDS": SearchFilter("COORDS","COORDS_NORM_nls_2_vcnt"),
+        "COORDS":  SearchFilter("COORDS","COORDS_NORM_nls_2_vcnt"),
         "ONE_HOT": SearchFilter("ONE_HOT","ONE_HOT_paf"),
+        "MULTI_HOT": SearchFilter("MULTI_HOT")
     }
     out_file = output_dir / 'compared_encodes.png'
+    ablation_traverse(search_base,search_targets,search_filters,out_file)
+
+    search_filters = {
+        "ReLU":    SearchFilter("HReLU"),
+        "Sigmoid": SearchFilter("HSigmoid"),
+        "Tanh":    SearchFilter("HTanh"),
+    }
+    out_file = output_dir / 'compared_hidden.png'
     ablation_traverse(search_base,search_targets,search_filters,out_file)
 
     search_filters = {

@@ -557,6 +557,7 @@ def fast_experiment_1(
 
         print(f"[INFO] {basename(maze_path)}: MAX_STEPS = {MAX_STEPS}, LEARN_STEPS = {LEARN_STEPS}")
 
+
         epsilon_decay = exp_decay_factor_to(
             final_epsilon=0.1,
             final_step=MAX_STEPS * EPISODES,
@@ -1081,15 +1082,18 @@ def fast_experiment_start_equal(
         "./mazes/big_eg.maze",
     ]
 
+    """
+    ONE-HOT: Vector with one in the (C*r + c) element and with R * C size
+    N-HOT  : Vector with one in the r and one in the R+c elements and with R _ C size
+    """
+
     STATE_REPRESENTATIONS = [
+        StateRepresentation(state_encoder=StateEncoder.MULTI_HOT),
         StateRepresentation(state_encoder=StateEncoder.ONE_HOT),
-        
         StateRepresentation(state_encoder=StateEncoder.COORDS, possible_actions_feature=True),
-        
         StateRepresentation(state_encoder=StateEncoder.COORDS_NORM, 
                             num_last_states=2, 
                             visited_count=True),
-
         StateRepresentation(state_encoder=StateEncoder.ONE_HOT, 
                             possible_actions_feature=True),
     ]
@@ -1159,7 +1163,7 @@ def fast_experiment_start_equal(
             convergence_threshold=0.01,
         )
         
-        # TODO: Paralelizar ambientes (OpenAi Gym Approach)
+        # TODO: Paralelizar ambientes (OpenAi Gym Approach) 
         # TODO: Adicionar outros metodos de verificar necessidade de inserção
         
         hp = GlobalHyperparameters(
@@ -1172,7 +1176,8 @@ def fast_experiment_start_equal(
             batch_size              = 512,
             steps_learn_interval    = LEARN_STEPS,
             rolling_window_size     = 20,
-            
+            use_per                 = False,
+            use_reward_shaping      = True,
             insert_patience         = 15,
             insert_min_goals        = 5,
             insert_min_variance     = 0.6,

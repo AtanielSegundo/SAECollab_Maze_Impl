@@ -46,6 +46,10 @@ class GPUMazeWrapper:
         if state_encoder is None:
             state_encoder = StateEncoder.COORDS
         self._enc = state_encoder
+        # ONE_HOT and MULTI_HOT share the same "blended" history pipeline:
+        # past encodings are summed into the base with 0.5^i decay instead
+        # of being concatenated.
+        self._blended = state_encoder in (StateEncoder.ONE_HOT, StateEncoder.MULTI_HOT)
 
         self._n_ls   = num_last_states  or 0
         self._n_la   = num_last_actions or 0
@@ -72,8 +76,26 @@ class GPUMazeWrapper:
         self._grid = maze.grid          # numpy uint8
         self._rew  = {v.value:v.reward for v in list(GridCell)}
 
-        # ── Base encoding lookup tables ───────────────────────────────────
+        # Total cell count — used by all subsequent lookup tables.
         n = self.rows * self.cols
+
+        # ── Reward shaping (potential-based, Ng et al. 1999) ──────────────
+        # Phi(s) = -manhattan(s, goal) / max_dist; F(s,s') = gamma_phi*Phi(s') - Phi(s).
+        # Pre-build a flat lookup table indexed by next_idx for zero-overhead lookup.
+        self._use_shaping = bool(getattr(maze, "reward_shaping", False))
+        if self._use_shaping:
+            self._shaping_gamma = float(getattr(maze, "shaping_gamma", 0.99))
+            max_dist = float(max(1, (self.rows - 1) + (self.cols - 1)))
+            phi = np.empty(n, dtype=np.float32)
+            for r in range(self.rows):
+                for c in range(self.cols):
+                    phi[r * self.cols + c] = -float(abs(r - self.goal_r) + abs(c - self.goal_c)) / max_dist
+            self._phi = phi
+        else:
+            self._shaping_gamma = 0.0
+            self._phi = None
+
+        # ── Base encoding lookup tables ───────────────────────────────────
         if state_encoder == StateEncoder.COORDS:
             self.base_enc_size = 2
             enc_np = np.array(
@@ -90,6 +112,13 @@ class GPUMazeWrapper:
         elif state_encoder == StateEncoder.ONE_HOT:
             self.base_enc_size = n
             enc_np = np.eye(n, dtype=np.float32)
+        elif state_encoder == StateEncoder.MULTI_HOT:
+            self.base_enc_size = self.rows + self.cols
+            enc_np = np.zeros((n, self.base_enc_size), dtype=np.float32)
+            for r in range(self.rows):
+                for c in range(self.cols):
+                    enc_np[r * self.cols + c, r] = 1.0
+                    enc_np[r * self.cols + c, self.rows + c] = 1.0
         else:
             raise ValueError(f"Unknown StateEncoder: {state_encoder}")
 
@@ -111,8 +140,8 @@ class GPUMazeWrapper:
             self._pa_cpu = masks
 
         # ── State size ────────────────────────────────────────────────────
-        if state_encoder == StateEncoder.ONE_HOT:
-            # ONE_HOT: history is blended into base encoding, not concatenated
+        if self._blended:
+            # ONE_HOT / MULTI_HOT: history is blended into base, not concatenated
             self.state_size = self.base_enc_size
         else:
             self.state_size = self.base_enc_size + 2 * self._n_ls
@@ -123,7 +152,7 @@ class GPUMazeWrapper:
 
         # ── History buffers (GPU + CPU mirrors) ───────────────────────────
         if self._n_ls > 0:
-            if state_encoder == StateEncoder.ONE_HOT:
+            if self._blended:
                 # Store indices; CPU mirror for numpy assembly
                 self._ls_idx_gpu = torch.zeros(self._n_ls, dtype=torch.long,  device=self.device)
                 self._ls_idx_cpu = np.zeros(self._n_ls, dtype=np.int64)
@@ -143,8 +172,7 @@ class GPUMazeWrapper:
             self._la_len = 0
 
         if self._use_vc:
-            # Visited count lives on CPU (the `and` bug in original means it's always 0
-            # anyway — matched here for correctness)
+            # Visited count lives on CPU (small, only updated once per step).
             self._vc = np.zeros(n, dtype=np.float32)
 
         # ── Pre-allocated output tensor (returned by reset/step) ──────────
@@ -167,10 +195,9 @@ class GPUMazeWrapper:
 
     def _write_gpu(self, idx: int, buf: torch.Tensor) -> None:
         """Fill buf[0] with the full state vector using GPU lookups only."""
-        SE   = self._StateEncoder
         base = self._benc_gpu[idx]           # (enc_size,)  — GPU
 
-        if self._enc == SE.ONE_HOT:
+        if self._blended:
             s = base.clone()
             if self._n_ls > 0 and self._ls_len > 0:
                 n    = min(self._ls_len, self._n_ls)
@@ -203,10 +230,8 @@ class GPUMazeWrapper:
 
     def _build_cpu(self, idx: int) -> np.ndarray:
         """Build state as numpy from CPU-resident data — no GPU sync for COORDS."""
-        SE = self._StateEncoder
-
-        if self._enc == SE.ONE_HOT:
-            # ONE_HOT: need GPU indices, one small sync
+        if self._blended:
+            # ONE_HOT / MULTI_HOT: history blended via decayed sum on CPU mirror
             s = self._benc_cpu[idx].copy()
             if self._n_ls > 0 and self._ls_len > 0:
                 n = min(self._ls_len, self._n_ls)
@@ -256,7 +281,7 @@ class GPUMazeWrapper:
         self._c = self.start_c
 
         if self._n_ls > 0:
-            if self._enc == self._StateEncoder.ONE_HOT:
+            if self._blended:
                 self._ls_idx_gpu.zero_()
                 self._ls_idx_cpu[:] = 0
             else:
@@ -303,19 +328,27 @@ class GPUMazeWrapper:
                 reward = self._rew.get(cell, -0.01)
 
         next_idx = nr * self.cols + nc
+        cur_idx  = r * self.cols + c
 
-        # Visited count — matches original `and` (not `or`) semantics
+        # Visited count — increment whenever the agent actually moved (any axis).
+        # Original used `and`, but the env has no diagonal moves so the condition
+        # never fired and visit_count was always 0.
         if self._use_vc:
-            if nr != r and nc != c:
+            if nr != r or nc != c:
                 self._vc[next_idx] += 1
             reward *= float(1.0 + self._vc[next_idx])
+
+        # Potential-based shaping: applied after scaling so it adds a clean directional
+        # bonus on top of the (possibly visit-amplified) base reward.
+        if self._use_shaping:
+            reward += self._shaping_gamma * float(self._phi[next_idx]) - float(self._phi[cur_idx])
 
         # ── Update history buffers (GPU + CPU mirrors) ────────────────────
         # Deque semantics: index 0 = oldest, -1 = newest. Shift left, append at end.
         if self._n_ls > 0:
             if self._ls_len < self._n_ls:
                 self._ls_len += 1
-            if self._enc == self._StateEncoder.ONE_HOT:
+            if self._blended:
                 # GPU shift
                 if self._n_ls > 1:
                     self._ls_idx_gpu[:-1].copy_(self._ls_idx_gpu[1:].clone())

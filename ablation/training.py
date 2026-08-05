@@ -188,7 +188,13 @@ def train_saecollab_tolerance_model(
         epsilon_decay=hp.epsilon_decay,
         learn_interval=hp.steps_learn_interval,
         min_replay_size=max(1000,2*hp.batch_size),
-        use_bias=model_arch.use_bias
+        use_bias=model_arch.use_bias,
+        use_per=getattr(hp, "use_per", False),
+        per_alpha=getattr(hp, "per_alpha", 0.6),
+        per_beta_start=getattr(hp, "per_beta_start", 0.4),
+        per_beta_final=getattr(hp, "per_beta_final", 1.0),
+        per_beta_steps=getattr(hp, "per_beta_steps", 100_000),
+        per_eps=getattr(hp, "per_eps", 1e-6),
     )
     #agent.compile()
     parameters_cnt = sum(p.numel() for p in agent.policy_net.parameters())
@@ -207,6 +213,7 @@ def train_saecollab_tolerance_model(
         epoch_start_time = time.perf_counter()
         cum_reward = 0.0
         cum_steps  = 0
+        truncated  = False
 
         state_gpu = env.reset()               # (1, state_size) on GPU -- zero transfer
         state_np  = env.last_state_np         # (state_size,)   on CPU -- zero GPU sync
@@ -221,6 +228,11 @@ def train_saecollab_tolerance_model(
                 cum_goals            += 1
 
             next_np = env.last_state_np       # CPU -- zero GPU sync
+            # `done` here means TERMINATED (goal reached). When the loop exits
+            # by max_steps without `done`, the episode is TRUNCATED: the last
+            # transition is stored with done=False so the bootstrap target
+            # `r + gamma * max Q(s',a')` continues to estimate the value of s'
+            # (Gymnasium convention; avoids underestimating Q at the cap).
             agent.remember(state_np, action, reward, next_np, done)
 
             state_gpu = next_gpu              # GPU tensor -- zero transfer
@@ -229,6 +241,8 @@ def train_saecollab_tolerance_model(
             cum_steps   = step
             if done:
                 break
+        else:
+            truncated = True
 
         agent.policy_net.step_all_etas()
         agent.update_epsilon()
@@ -386,7 +400,13 @@ def train_reserved_saecollab_tolerance_model(
         epsilon_decay         = hp.epsilon_decay,
         learn_interval        = hp.steps_learn_interval,
         min_replay_size       = max(1000, 2 * hp.batch_size),
-        use_bias              = model_arch.use_bias
+        use_bias              = model_arch.use_bias,
+        use_per               = getattr(hp, "use_per", False),
+        per_alpha             = getattr(hp, "per_alpha", 0.6),
+        per_beta_start        = getattr(hp, "per_beta_start", 0.4),
+        per_beta_final        = getattr(hp, "per_beta_final", 1.0),
+        per_beta_steps        = getattr(hp, "per_beta_steps", 100_000),
+        per_eps               = getattr(hp, "per_eps", 1e-6),
     )
     #agent.compile()
     parameters_cnt = sum(
@@ -408,6 +428,7 @@ def train_reserved_saecollab_tolerance_model(
         epoch_start_time = time.perf_counter()
         cum_reward = 0.0
         cum_steps  = 0
+        truncated  = False
 
         state_gpu = env.reset()               # (1, state_size) on GPU -- zero transfer
         state_np  = env.last_state_np         # (state_size,)   on CPU -- zero GPU sync
@@ -422,6 +443,9 @@ def train_reserved_saecollab_tolerance_model(
                 cum_goals             += 1
 
             next_np = env.last_state_np       # CPU -- zero GPU sync
+            # Same semantics as the non-reserved variant: done=True only on
+            # goal (terminated); on max_steps cap, episode is truncated and
+            # the last transition keeps done=False so bootstrap continues.
             agent.remember(state_np, action, reward, next_np, done)
 
             state_gpu = next_gpu              # GPU tensor -- zero transfer
@@ -430,6 +454,8 @@ def train_reserved_saecollab_tolerance_model(
             cum_steps   = step
             if done:
                 break
+        else:
+            truncated = True
 
         agent.policy_net.step_all_etas()
         agent.update_epsilon()
@@ -664,6 +690,12 @@ def train_baseline_dense_model(
         epsilon_decay=hp.epsilon_decay,
         learn_interval=hp.steps_learn_interval,
         min_replay_size=max(1000,2*hp.batch_size),
+        use_per=getattr(hp, "use_per", False),
+        per_alpha=getattr(hp, "per_alpha", 0.6),
+        per_beta_start=getattr(hp, "per_beta_start", 0.4),
+        per_beta_final=getattr(hp, "per_beta_final", 1.0),
+        per_beta_steps=getattr(hp, "per_beta_steps", 100_000),
+        per_eps=getattr(hp, "per_eps", 1e-6),
     )
     #agent.compile()
     parameters_cnt = sum(p.numel() for p in agent.policy_net.parameters())
@@ -678,6 +710,7 @@ def train_baseline_dense_model(
         epoch_start_time = time.perf_counter()
         cum_reward = 0.0
         cum_steps  = 0
+        truncated  = False
 
         state_gpu = env.reset()               # (1, state_size) on GPU -- zero transfer
         state_np  = env.last_state_np         # (state_size,)   on CPU -- zero GPU sync
@@ -691,6 +724,9 @@ def train_baseline_dense_model(
                 cum_goals            += 1
 
             next_np = env.last_state_np       # CPU -- zero GPU sync
+            # done=True only on goal (terminated). max_steps cap leaves the
+            # last transition with done=False so bootstrap continues — the
+            # canonical Gymnasium-style handling for truncation.
             agent.remember(state_np, action, reward, next_np, done)
 
             state_gpu = next_gpu              # GPU tensor -- zero transfer
@@ -699,6 +735,8 @@ def train_baseline_dense_model(
             cum_steps   = step
             if done:
                 break
+        else:
+            truncated = True
 
         agent.update_epsilon()
         loss_val = float(agent.loss)
@@ -765,7 +803,11 @@ def train_thread(
     # GPUMazeWrapper  -> constructed directly; returns GPU tensors natively.
     # MazeGymWrapper  -> wrapped in CPUMazeWrapperAdapter so training
     #                   functions (written against GPUMazeWrapper) need no changes.
-    maze_env = MazeEnv(maze_path)
+    maze_env = MazeEnv(
+        maze_path,
+        reward_shaping=getattr(hp, "use_reward_shaping", False),
+        shaping_gamma=hp.discount_factor,
+    )
     if maze_wrapper is GPUMazeWrapper:
         env = GPUMazeWrapper(maze_env, device=device, **state_repr.opts)
     else:

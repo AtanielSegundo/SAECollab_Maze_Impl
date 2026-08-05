@@ -23,6 +23,20 @@ class GlobalHyperparameters:
     insert_min_goals:int
     insert_min_variance:float
 
+    # ── Optional convergence-improvement features ─────────────────────────
+    # Potential-based reward shaping (Ng et al. 1999).
+    # Adds F(s, s') = gamma * Phi(s') - Phi(s) with Phi based on Manhattan
+    # distance to goal. Preserves the optimal policy.
+    use_reward_shaping: bool  = False
+
+    # Prioritized Experience Replay (Schaul et al. 2016, proportional variant).
+    use_per           : bool  = False
+    per_alpha         : float = 0.6     # priority exponent (0 = uniform)
+    per_beta_start    : float = 0.4     # IS-correction exponent at training start
+    per_beta_final    : float = 1.0     # IS-correction exponent at end (annealed)
+    per_beta_steps    : int   = 100_000 # steps over which beta is annealed
+    per_eps           : float = 1e-6    # added to |TD-error| before exponentiation
+
 class LayerInsertionType(Enum):
     CNT = "CNT"
     CRT = "CRT"

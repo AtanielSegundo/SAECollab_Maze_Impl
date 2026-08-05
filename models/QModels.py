@@ -130,7 +130,242 @@ class FastReplayBuffer:
 
         return states_b, actions_b, rewards_b, next_states_b, dones_b
 
-def exp_decay_factor_to(final_epsilon: float, 
+class _SumTree:
+    """Binary segment tree with sum aggregation, used by PrioritizedReplayBuffer.
+    Leaves store priorities in [0, capacity); internal nodes store partial sums.
+    Supports O(log n) point updates and O(log n) prefix-sum queries."""
+
+    __slots__ = ("capacity", "tree", "_offset")
+
+    def __init__(self, capacity: int):
+        self.capacity = int(capacity)
+        # Full binary tree backed by a flat array. capacity nodes are leaves;
+        # capacity - 1 are internal. Size = 2*capacity - 1.
+        self.tree    = np.zeros(2 * self.capacity - 1, dtype=np.float64)
+        self._offset = self.capacity - 1   # index of the first leaf
+
+    def total(self) -> float:
+        return float(self.tree[0])
+
+    def update(self, data_idx: int, priority: float) -> None:
+        idx    = data_idx + self._offset
+        change = priority - self.tree[idx]
+        self.tree[idx] = priority
+        # Propagate to root
+        while idx > 0:
+            idx = (idx - 1) >> 1
+            self.tree[idx] += change
+
+    def get(self, s: float) -> Tuple[int, float]:
+        """Return (data_idx, priority) for the leaf whose prefix-sum bracket contains s."""
+        idx = 0
+        while idx < self._offset:
+            left  = 2 * idx + 1
+            right = left + 1
+            if s <= self.tree[left]:
+                idx = left
+            else:
+                s  -= self.tree[left]
+                idx = right
+        return idx - self._offset, float(self.tree[idx])
+
+
+class PrioritizedReplayBuffer:
+    """Prioritized Experience Replay (Schaul et al. 2016, proportional variant).
+
+    Same on-device storage strategy as FastReplayBuffer (preallocated tensors,
+    pinned memory). Priorities are kept on a SumTree for O(log n) sampling.
+
+    Args:
+        capacity         : ring-buffer capacity
+        state_shape      : shape of a single state vector
+        alpha            : priority exponent (0 = uniform, 1 = full priority)
+        beta_start       : initial IS-correction exponent
+        beta_final       : final IS-correction exponent (annealed to 1.0)
+        beta_steps       : steps over which beta is annealed
+        eps              : small constant added to |TD-error| before exponentiation
+        storage_device   : where to keep the state tensors
+        pin_memory       : pin CPU memory for fast async H2D transfers
+        dtype            : state tensor dtype
+
+    sample() returns: (states, actions, rewards, next_states, dones, is_weights, indices).
+    update_priorities(indices, td_errors) must be called after the learn step.
+    """
+
+    def __init__(self, capacity: int, state_shape: Tuple[int, ...],
+                 alpha: float = 0.6, beta_start: float = 0.4, beta_final: float = 1.0,
+                 beta_steps: int = 100_000, eps: float = 1e-6,
+                 storage_device: Union[str, torch.device] = "cpu",
+                 pin_memory: bool = True, dtype=torch.float32):
+        self.capacity        = int(capacity)
+        self.state_shape     = tuple(state_shape)
+        self.idx             = 0
+        self.size            = 0
+        self.dtype           = dtype
+
+        self.alpha           = float(alpha)
+        self.beta_start      = float(beta_start)
+        self.beta_final      = float(beta_final)
+        self.beta_steps      = max(1, int(beta_steps))
+        self.eps             = float(eps)
+        self._beta_step_idx  = 0
+
+        self.storage_device  = torch.device(storage_device)
+        self.pin_memory      = bool(pin_memory) and (self.storage_device.type == "cpu")
+
+        alloc_kwargs = {"dtype": self.dtype}
+        if self.pin_memory:
+            alloc_kwargs["pin_memory"] = True
+
+        self.states      = torch.empty((self.capacity, *self.state_shape), **alloc_kwargs)
+        self.next_states = torch.empty((self.capacity, *self.state_shape), **alloc_kwargs)
+        self.actions     = torch.empty((self.capacity,), dtype=torch.long)
+        self.rewards     = torch.empty((self.capacity,), dtype=torch.float32)
+        self.dones       = torch.empty((self.capacity,), dtype=torch.uint8)
+
+        if self.storage_device.type == "cuda":
+            self.states      = self.states.to(self.storage_device)
+            self.next_states = self.next_states.to(self.storage_device)
+            self.actions     = self.actions.to(self.storage_device)
+            self.rewards     = self.rewards.to(self.storage_device)
+            self.dones       = self.dones.to(self.storage_device)
+
+        self._tree         = _SumTree(self.capacity)
+        self._max_priority = 1.0   # all-new entries enter at the current max
+        # Hard cap on raw |TD-error| stored in _max_priority and on individual
+        # priorities. Prevents NaN/inf produced by transient network divergence
+        # from poisoning the SumTree (which would otherwise propagate to total()
+        # and crash sample() with OverflowError on np.random.uniform).
+        self._priority_cap = 1e6
+
+    def __len__(self):
+        return int(self.size)
+
+    @property
+    def beta(self) -> float:
+        """Linearly anneals from beta_start to beta_final over beta_steps."""
+        frac = min(1.0, self._beta_step_idx / self.beta_steps)
+        return self.beta_start + frac * (self.beta_final - self.beta_start)
+
+    def push(self, state, action, reward, next_state, done) -> None:
+        if not torch.is_tensor(state):
+            state = torch.as_tensor(state, dtype=self.dtype)
+        if not torch.is_tensor(next_state):
+            next_state = torch.as_tensor(next_state, dtype=self.dtype)
+
+        if state.ndim == 2 and state.shape[0] == 1:
+            state = state.squeeze(0)
+        if next_state.ndim == 2 and next_state.shape[0] == 1:
+            next_state = next_state.squeeze(0)
+
+        if state.device != self.states.device:
+            state = state.to(self.states.device)
+        if next_state.device != self.next_states.device:
+            next_state = next_state.to(self.next_states.device)
+
+        self.states[self.idx].copy_(state.reshape(self.state_shape))
+        self.next_states[self.idx].copy_(next_state.reshape(self.state_shape))
+        self.actions[self.idx] = int(action)
+        self.rewards[self.idx] = float(reward)
+        self.dones[self.idx]   = 1 if done else 0
+
+        # New transitions enter at the current max priority so they are
+        # virtually guaranteed to be sampled at least once.
+        # _max_priority is already sanitized in update_priorities, so this
+        # exponentiation is safe — but we cap defensively in case nothing has
+        # been updated yet and the default value drifted.
+        max_p    = min(float(self._max_priority), self._priority_cap)
+        priority = (max_p + self.eps) ** self.alpha
+        self._tree.update(self.idx, priority)
+
+        self.idx  = (self.idx + 1) % self.capacity
+        self.size = min(self.size + 1, self.capacity)
+
+    def sample(self, batch_size: int,
+               device: Optional[Union[str, torch.device]] = None,
+               non_blocking: bool = True):
+        assert self.size > 0, "Buffer is empty"
+        self._beta_step_idx += 1
+
+        # Stratified sampling: split the cumulative-sum range into batch_size
+        # equal segments and draw one uniform per segment. Reduces variance vs
+        # plain proportional sampling while staying O(batch * log capacity).
+        total = self._tree.total()
+
+        if not np.isfinite(total) or total <= 0.0:
+            # Last-resort guard: if anything ever poisons the tree with
+            # non-finite priorities (NaN/inf from a divergent network), fall
+            # back to uniform sampling for this batch instead of crashing the
+            # worker on np.random.uniform with a NaN/inf range.
+            idxs_np  = np.random.randint(0, self.size, size=batch_size, dtype=np.int64)
+            prios_np = np.full(batch_size, self.eps, dtype=np.float64)
+            total    = float(self.size) * self.eps
+        else:
+            seg      = total / batch_size
+            idxs_np  = np.empty(batch_size, dtype=np.int64)
+            prios_np = np.empty(batch_size, dtype=np.float64)
+            for i in range(batch_size):
+                s = np.random.uniform(seg * i, seg * (i + 1))
+                data_idx, p = self._tree.get(s)
+                # Defensive: if we overshoot past the populated region (rare
+                # numeric edge case), clamp to a valid index.
+                if data_idx >= self.size:
+                    data_idx = self.size - 1
+                    p        = max(p, self.eps)
+                idxs_np[i]  = data_idx
+                prios_np[i] = p
+
+        # P(i) = p_i / total ; w_i = (N * P(i))^(-beta) ; normalize by max
+        N      = self.size
+        sample_p = prios_np / max(total, 1e-12)
+        is_w     = (N * sample_p) ** (-self.beta)
+        is_w   /= is_w.max() if is_w.max() > 0 else 1.0
+
+        idxs_t = torch.from_numpy(idxs_np).to(self.states.device)
+
+        states_b      = self.states.index_select(0, idxs_t)
+        next_states_b = self.next_states.index_select(0, idxs_t)
+        actions_b     = self.actions.index_select(0, idxs_t)
+        rewards_b     = self.rewards.index_select(0, idxs_t)
+        dones_b       = self.dones.index_select(0, idxs_t)
+        is_weights_b  = torch.from_numpy(is_w.astype(np.float32))
+
+        target_device = torch.device(device) if device is not None else self.states.device
+        if target_device != self.states.device:
+            states_b      = states_b.to(target_device, non_blocking=non_blocking)
+            next_states_b = next_states_b.to(target_device, non_blocking=non_blocking)
+            actions_b     = actions_b.to(target_device, non_blocking=non_blocking)
+            rewards_b     = rewards_b.to(target_device, non_blocking=non_blocking)
+            dones_b       = dones_b.to(target_device, non_blocking=non_blocking)
+        if is_weights_b.device != target_device:
+            is_weights_b = is_weights_b.to(target_device, non_blocking=non_blocking)
+
+        return states_b, actions_b, rewards_b, next_states_b, dones_b, is_weights_b, idxs_np
+
+    def update_priorities(self, indices: np.ndarray, td_errors) -> None:
+        """Update the priorities of the given transitions from |TD-error|.
+
+        Sanitizes NaN/inf values that can leak in from a transiently divergent
+        network (replacing them with 0) and caps the raw |TD-error| so that
+        no single outlier can blow up the SumTree total."""
+        if torch.is_tensor(td_errors):
+            td_errors = td_errors.detach().abs().float().cpu().numpy()
+        else:
+            td_errors = np.abs(np.asarray(td_errors, dtype=np.float64))
+
+        # Replace NaN/+inf/-inf with 0; clamp finite outliers to the cap.
+        td_errors = np.nan_to_num(td_errors, nan=0.0, posinf=0.0, neginf=0.0)
+        td_errors = np.minimum(td_errors, self._priority_cap)
+
+        for data_idx, td in zip(indices, td_errors):
+            td_f = float(td)
+            p    = (td_f + self.eps) ** self.alpha
+            self._tree.update(int(data_idx), p)
+            if td_f > self._max_priority:
+                self._max_priority = td_f
+
+
+def exp_decay_factor_to(final_epsilon: float,
                         final_step: int, 
                         epsilon_start: float = 1.0,
                         convergence_threshold: float = 0.01) -> float:
@@ -231,7 +466,13 @@ class TorchDDQN:
                  learn_interval: int = 16,
                  tau: float = 0.005,
                  grad_clip: float = 10.0,
-                 min_replay_size: int = 1000):
+                 min_replay_size: int = 1000,
+                 use_per: bool = False,
+                 per_alpha: float = 0.6,
+                 per_beta_start: float = 0.4,
+                 per_beta_final: float = 1.0,
+                 per_beta_steps: int = 100_000,
+                 per_eps: float = 1e-6):
 
         if device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -265,15 +506,31 @@ class TorchDDQN:
         self.target_net.eval()
 
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=lr)
-        self.loss_fn = nn.HuberLoss()
+        # Per-element Huber loss; reduction is applied manually so we can
+        # weight by importance-sampling weights when PER is enabled.
+        self.loss_fn = nn.HuberLoss(reduction='none')
 
-        # self.replay = ReplayBuffer(capacity=buffer_size)
-        self.replay = FastReplayBuffer(capacity=buffer_size,
-                                        state_shape=(self.state_size,),
-                                        storage_device="cpu",
-                                        pin_memory=torch.cuda.is_available(),
-                                        dtype=torch.float32
-                                        )
+        self.use_per = bool(use_per)
+        if self.use_per:
+            self.replay = PrioritizedReplayBuffer(
+                capacity        = buffer_size,
+                state_shape     = (self.state_size,),
+                alpha           = per_alpha,
+                beta_start      = per_beta_start,
+                beta_final      = per_beta_final,
+                beta_steps      = per_beta_steps,
+                eps             = per_eps,
+                storage_device  = "cpu",
+                pin_memory      = torch.cuda.is_available(),
+                dtype           = torch.float32,
+            )
+        else:
+            self.replay = FastReplayBuffer(capacity=buffer_size,
+                                            state_shape=(self.state_size,),
+                                            storage_device="cpu",
+                                            pin_memory=torch.cuda.is_available(),
+                                            dtype=torch.float32
+                                            )
 
 
     def compile(self):
@@ -315,8 +572,14 @@ class TorchDDQN:
         if len(self.replay) < self.min_replay_size:
             return
 
-        states_t, actions_t, rewards_t, next_states_t, dones_t = \
-        self.replay.sample(self.batch_size, device=self.device, non_blocking=True)
+        if self.use_per:
+            states_t, actions_t, rewards_t, next_states_t, dones_t, is_weights_t, sample_idxs = \
+                self.replay.sample(self.batch_size, device=self.device, non_blocking=True)
+        else:
+            states_t, actions_t, rewards_t, next_states_t, dones_t = \
+                self.replay.sample(self.batch_size, device=self.device, non_blocking=True)
+            is_weights_t = None
+            sample_idxs  = None
 
         # ensure dtypes
         actions_t = actions_t.long()
@@ -335,7 +598,11 @@ class TorchDDQN:
                     target_q     = rewards_t + self.gamma * next_q * (1.0 - dones_t)
 
             # fp32 loss — outside autocast
-            loss = self.loss_fn(q_values.float(), target_q.float())
+            elem_loss = self.loss_fn(q_values.float(), target_q.float())
+            if is_weights_t is not None:
+                loss = (elem_loss * is_weights_t.float()).mean()
+            else:
+                loss = elem_loss.mean()
             self.loss = loss.item()
 
             self.optimizer.zero_grad(set_to_none=True)
@@ -351,13 +618,23 @@ class TorchDDQN:
                 next_q       = self.target_net(next_states_t).gather(1, next_actions.unsqueeze(1)).squeeze(1)
                 target_q     = rewards_t + self.gamma * next_q * (1.0 - dones_t)
 
-            loss = self.loss_fn(q_values, target_q)
+            elem_loss = self.loss_fn(q_values, target_q)
+            if is_weights_t is not None:
+                loss = (elem_loss * is_weights_t).mean()
+            else:
+                loss = elem_loss.mean()
             self.loss = loss.item()  # FIX: store scalar, not tensor
 
             self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), self.grad_clip)
             self.optimizer.step()
+
+        # PER: refresh sampled priorities from the (detached) TD-errors.
+        if self.use_per and sample_idxs is not None:
+            with torch.no_grad():
+                td_err = (q_values.detach() - target_q.detach()).abs()
+            self.replay.update_priorities(sample_idxs, td_err)
 
         # Polyak / hard update
         if self.tau and self.tau > 0:
@@ -414,7 +691,13 @@ class SAECollabDDQN:
                  tau: float = 0.005,
                  grad_clip: float = 10.0,
                  min_replay_size: int = 1000,
-                 use_bias: LayersConfig = None):
+                 use_bias: LayersConfig = None,
+                 use_per: bool = False,
+                 per_alpha: float = 0.6,
+                 per_beta_start: float = 0.4,
+                 per_beta_final: float = 1.0,
+                 per_beta_steps: int = 100_000,
+                 per_eps: float = 1e-6):
 
         if device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -446,7 +729,8 @@ class SAECollabDDQN:
         policy_params = [p for p in self.policy_net.parameters() if p.requires_grad]
         _lr = self.lr if isinstance(self.lr, float) else self.lr[0]
         self.optimizer = optim.Adam(policy_params, lr=_lr)
-        self.loss_fn = nn.HuberLoss()
+        # Per-element loss enables IS-weighting under PER.
+        self.loss_fn = nn.HuberLoss(reduction='none')
 
         self.layers_added = 0
         self.steps_done = 0
@@ -464,13 +748,27 @@ class SAECollabDDQN:
         self.grad_clip = grad_clip
         self.min_replay_size = min_replay_size
 
-        # self.replay = ReplayBuffer(capacity=buffer_size)
-        self.replay = FastReplayBuffer(capacity=buffer_size,
-                                        state_shape=(self.state_size,),
-                                        storage_device="cpu",
-                                        pin_memory=torch.cuda.is_available(),
-                                        dtype=torch.float32
-                                        )
+        self.use_per = bool(use_per)
+        if self.use_per:
+            self.replay = PrioritizedReplayBuffer(
+                capacity        = buffer_size,
+                state_shape     = (self.state_size,),
+                alpha           = per_alpha,
+                beta_start      = per_beta_start,
+                beta_final      = per_beta_final,
+                beta_steps      = per_beta_steps,
+                eps             = per_eps,
+                storage_device  = "cpu",
+                pin_memory      = torch.cuda.is_available(),
+                dtype           = torch.float32,
+            )
+        else:
+            self.replay = FastReplayBuffer(capacity=buffer_size,
+                                            state_shape=(self.state_size,),
+                                            storage_device="cpu",
+                                            pin_memory=torch.cuda.is_available(),
+                                            dtype=torch.float32
+                                            )
 
     def compile(self):
         if torch.__version__ >= "2.0" and self.device.type == "cuda":
@@ -487,7 +785,7 @@ class SAECollabDDQN:
     def act(self, state, eval: bool = False) -> int:
         if not eval:
             self.steps_done += 1
-        
+
         if not eval and rand.random() < self.epsilon:
             return rand.randrange(self.action_size)
 
@@ -496,10 +794,10 @@ class SAECollabDDQN:
                 s = state if state.device == self.device else state.to(self.device, non_blocking=True)
             else:
                 s = torch.from_numpy(np.asarray(state, dtype=np.float32)).to(self.device, non_blocking=True)
-            
+
             if s.ndim == 1:
                 s = s.unsqueeze(0)
-            
+
             q, _, _ = self.policy_net(s)
             return int(torch.argmax(q, dim=1).item())
 
@@ -541,14 +839,20 @@ class SAECollabDDQN:
         if len(self.replay) < self.min_replay_size:
             return
 
-        states_t, actions_t, rewards_t, next_states_t, dones_t = \
-        self.replay.sample(self.batch_size, device=self.device, non_blocking=True)
+        if self.use_per:
+            states_t, actions_t, rewards_t, next_states_t, dones_t, is_weights_t, sample_idxs = \
+                self.replay.sample(self.batch_size, device=self.device, non_blocking=True)
+        else:
+            states_t, actions_t, rewards_t, next_states_t, dones_t = \
+                self.replay.sample(self.batch_size, device=self.device, non_blocking=True)
+            is_weights_t = None
+            sample_idxs  = None
 
         # ensure dtypes
         actions_t = actions_t.long()
         rewards_t = rewards_t.float()
         dones_t = dones_t.float()
-        
+
         if self.use_amp:
             # FIX: only forward passes under autocast; loss computed in fp32
             # outside the context to prevent fp16 FTZ underflow → 0.0 loss.
@@ -563,7 +867,11 @@ class SAECollabDDQN:
                     target_q = rewards_t + self.gamma * next_q * (1.0 - dones_t)
 
             # fp32 loss — outside autocast
-            loss = self.loss_fn(q_values.float(), target_q.float())
+            elem_loss = self.loss_fn(q_values.float(), target_q.float())
+            if is_weights_t is not None:
+                loss = (elem_loss * is_weights_t.float()).mean()
+            else:
+                loss = elem_loss.mean()
             self.loss = loss.item()
 
             self.optimizer.zero_grad(set_to_none=True)
@@ -579,7 +887,11 @@ class SAECollabDDQN:
                 next_q   = target_next_q_all.gather(1, next_actions.unsqueeze(1)).squeeze(1)
                 target_q = rewards_t + self.gamma * next_q * (1.0 - dones_t)
 
-            loss = self.loss_fn(q_values, target_q)
+            elem_loss = self.loss_fn(q_values, target_q)
+            if is_weights_t is not None:
+                loss = (elem_loss * is_weights_t).mean()
+            else:
+                loss = elem_loss.mean()
             self.loss = loss.item()  # FIX: store scalar, not tensor
 
             self.optimizer.zero_grad(set_to_none=True)
@@ -592,6 +904,12 @@ class SAECollabDDQN:
             self.scaler.update()
         else:
             self.optimizer.step()
+
+        # PER: refresh sampled priorities from |TD-error|.
+        if self.use_per and sample_idxs is not None:
+            with torch.no_grad():
+                td_err = (q_values.detach() - target_q.detach()).abs()
+            self.replay.update_priorities(sample_idxs, td_err)
 
         # FIX: learn_steps is NOT incremented here — only in remember()
 
@@ -607,7 +925,7 @@ class SAECollabDDQN:
         torch.save(self.policy_net, path_policy)
         if path_target:
             torch.save(self.target_net, path_target)
-    
+
     def load(self, path_policy:str, path_target:str=None):
         self.policy_net = torch.load(path_policy, map_location=self.device, weights_only=False)
         if path_target:
@@ -615,7 +933,7 @@ class SAECollabDDQN:
         else:
             self.target_net = copy.deepcopy(self.policy_net).to(self.device)
         self.target_net.eval()
-    
+
     def __call__(self, state, return_numpy: bool = False):
         if not torch.is_tensor(state):
             state = torch.as_tensor(state, dtype=torch.float32, device=self.device)
@@ -628,7 +946,7 @@ class SAECollabDDQN:
         if return_numpy:
             return out.cpu().numpy()
         return out
-    
+
 class ReservedSAECollabDDQN:
     def __init__(self,
                  state_size: int,
@@ -649,7 +967,13 @@ class ReservedSAECollabDDQN:
                  tau: float = 0.005,
                  grad_clip: float = 10.0,
                  min_replay_size: int = 1000,
-                 use_bias: LayersConfig = None):
+                 use_bias: LayersConfig = None,
+                 use_per: bool = False,
+                 per_alpha: float = 0.6,
+                 per_beta_start: float = 0.4,
+                 per_beta_final: float = 1.0,
+                 per_beta_steps: int = 100_000,
+                 per_eps: float = 1e-6):
 
         if device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -683,7 +1007,8 @@ class ReservedSAECollabDDQN:
                                      for i, layer in enumerate(self.policy_net.layers)])
         self.set_optimizer_to_head()
 
-        self.loss_fn = nn.HuberLoss()
+        # Per-element loss enables IS-weighting under PER.
+        self.loss_fn = nn.HuberLoss(reduction='none')
 
         self.layers_added = 0
         self.steps_done = 0
@@ -701,13 +1026,27 @@ class ReservedSAECollabDDQN:
         self.grad_clip = grad_clip
         self.min_replay_size = min_replay_size
 
-        # self.replay = ReplayBuffer(capacity=buffer_size)
-        self.replay = FastReplayBuffer(capacity=buffer_size,
-                                        state_shape=(self.state_size,),
-                                        storage_device="cpu",
-                                        pin_memory=torch.cuda.is_available(),
-                                        dtype=torch.float32
-                                        )
+        self.use_per = bool(use_per)
+        if self.use_per:
+            self.replay = PrioritizedReplayBuffer(
+                capacity        = buffer_size,
+                state_shape     = (self.state_size,),
+                alpha           = per_alpha,
+                beta_start      = per_beta_start,
+                beta_final      = per_beta_final,
+                beta_steps      = per_beta_steps,
+                eps             = per_eps,
+                storage_device  = "cpu",
+                pin_memory      = torch.cuda.is_available(),
+                dtype           = torch.float32,
+            )
+        else:
+            self.replay = FastReplayBuffer(capacity=buffer_size,
+                                            state_shape=(self.state_size,),
+                                            storage_device="cpu",
+                                            pin_memory=torch.cuda.is_available(),
+                                            dtype=torch.float32
+                                            )
 
     def compile(self):
         if torch.__version__ >= "2.0" and self.device.type == "cuda":
@@ -760,8 +1099,14 @@ class ReservedSAECollabDDQN:
         if len(self.replay) < self.min_replay_size:
             return
 
-        states_t, actions_t, rewards_t, next_states_t, dones_t = \
-        self.replay.sample(self.batch_size, device=self.device, non_blocking=True)
+        if self.use_per:
+            states_t, actions_t, rewards_t, next_states_t, dones_t, is_weights_t, sample_idxs = \
+                self.replay.sample(self.batch_size, device=self.device, non_blocking=True)
+        else:
+            states_t, actions_t, rewards_t, next_states_t, dones_t = \
+                self.replay.sample(self.batch_size, device=self.device, non_blocking=True)
+            is_weights_t = None
+            sample_idxs  = None
 
         # ensure dtypes
         actions_t = actions_t.long()
@@ -782,7 +1127,11 @@ class ReservedSAECollabDDQN:
                     target_q = rewards_t + self.gamma * next_q * (1.0 - dones_t)
 
             # fp32 loss — outside autocast
-            loss = self.loss_fn(q_values.float(), target_q.float())
+            elem_loss = self.loss_fn(q_values.float(), target_q.float())
+            if is_weights_t is not None:
+                loss = (elem_loss * is_weights_t.float()).mean()
+            else:
+                loss = elem_loss.mean()
             self.loss = loss.item()
 
             self.optimizer.zero_grad(set_to_none=True)
@@ -798,7 +1147,11 @@ class ReservedSAECollabDDQN:
                 next_q   = target_next_q_all.gather(1, next_actions.unsqueeze(1)).squeeze(1)
                 target_q = rewards_t + self.gamma * next_q * (1.0 - dones_t)
 
-            loss = self.loss_fn(q_values, target_q)
+            elem_loss = self.loss_fn(q_values, target_q)
+            if is_weights_t is not None:
+                loss = (elem_loss * is_weights_t).mean()
+            else:
+                loss = elem_loss.mean()
             self.loss = loss.item()  # FIX: store scalar, not tensor
 
             self.optimizer.zero_grad(set_to_none=True)
@@ -811,6 +1164,12 @@ class ReservedSAECollabDDQN:
             self.scaler.update()
         else:
             self.optimizer.step()
+
+        # PER: refresh sampled priorities from |TD-error|.
+        if self.use_per and sample_idxs is not None:
+            with torch.no_grad():
+                td_err = (q_values.detach() - target_q.detach()).abs()
+            self.replay.update_priorities(sample_idxs, td_err)
 
         # FIX: learn_steps is NOT incremented here — only in remember()
 

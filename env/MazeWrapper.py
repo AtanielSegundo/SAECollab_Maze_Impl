@@ -26,9 +26,10 @@ c - [is_left,is_right,is_up,is_down].reshape(1,-1)
 '''
 
 class StateEncoder(Enum):
-    COORDS = "coords"
+    COORDS      = "coords"
     COORDS_NORM = "coords_norm"
-    ONE_HOT = "one_hot"
+    ONE_HOT     = "one_hot"
+    MULTI_HOT   = "multi_hot"
 
     def encode(self, row, col, n_rows, n_cols):
         if self is StateEncoder.COORDS:
@@ -41,6 +42,10 @@ class StateEncoder(Enum):
         elif self is StateEncoder.ONE_HOT:
             idx = row * n_cols + col
             return np.eye(n_rows * n_cols, dtype=np.float32)[idx].reshape(1, -1)
+
+        elif self is StateEncoder.MULTI_HOT:
+            base = np.eye(n_rows + n_cols, dtype=np.float32)
+            return (base[row] + base[n_rows+col]).reshape(1, -1)
 
         else:
             raise ValueError("invalid encoder")
@@ -57,6 +62,10 @@ class StateEncoder(Enum):
             idx = np.argmax(arr[0])
             row = idx // n_cols
             col = idx % n_cols
+        elif self is StateEncoder.MULTI_HOT:
+            vec = arr.flatten()
+            row = int(np.argmax(vec[:n_rows]))
+            col = int(np.argmax(vec[n_rows:]))
         else:
             raise ValueError("Unknown state encoder")
         
@@ -95,6 +104,8 @@ class MazeGymWrapper:
 
         if self.state_encoder is StateEncoder.ONE_HOT:
             self.state_size = self.rows * self.cols
+        elif self.state_encoder is StateEncoder.MULTI_HOT:
+            self.state_size = self.rows + self.cols
         else:
             self.state_size = 2
             if self.last_states is not None:
@@ -102,6 +113,7 @@ class MazeGymWrapper:
         
         if self.last_actions is not None:
             self.state_size += 2 * self.last_actions.maxlen
+
         if self.possible_actions_feature:
             self.state_size += len(list(Action))
         
@@ -136,7 +148,10 @@ class MazeGymWrapper:
                 if i < len(self.last_states):  
                     if self.state_encoder is StateEncoder.ONE_HOT:
                         last_encoded = self.encode(self.last_states[i]).reshape(1, -1)*(0.5**i)
-                        state_encoded += last_encoded 
+                        state_encoded += last_encoded
+                    elif self.state_encoder is StateEncoder.MULTI_HOT:
+                        last_encoded = self.encode(self.last_states[i]).reshape(1, -1)*(0.5**i)
+                        state_encoded += last_encoded
                     else:
                         last_encoded = self.encode(self.last_states[i]).reshape(1, -1)
                         #print(f"Adding last_state {i}: {last_encoded}")
@@ -144,6 +159,8 @@ class MazeGymWrapper:
                 else:
                     if self.state_encoder is StateEncoder.ONE_HOT:
                         state_encoded += np.zeros((1, self.rows * self.cols), dtype=np.float32)
+                    elif self.state_encoder is StateEncoder.MULTI_HOT:
+                        state_encoded += np.zeros((1, self.rows + self.cols), dtype=np.float32)
                     else:
                         #print(f"Padding last_state {i} with zeros")
                         state_encoded = np.concatenate([state_encoded, np.zeros((1, 2), dtype=np.float32)], axis=1)
@@ -207,8 +224,10 @@ class MazeGymWrapper:
         next_state_coords = tuple(res.nextState)
         
         if self.visit_count is not None:
-            if next_state_coords[0] != self.state[0] and  next_state_coords[1] != self.state[1]:
-                self.visit_count[*next_state_coords] += 1 
+            # FIX: era `and`, mas o ambiente nao tem movimentos diagonais — a
+            # condicao nunca era verdadeira e o contador ficava sempre 0.
+            if next_state_coords[0] != self.state[0] or next_state_coords[1] != self.state[1]:
+                self.visit_count[*next_state_coords] += 1
 
         if self.last_states is not None:
             self.last_states.append(next_state_coords)

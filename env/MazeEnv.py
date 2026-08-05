@@ -74,26 +74,37 @@ class Grid:
                   end="\n" if c == self.cols-1 else "\t")
 
 class MazeEnv(Grid):
-    def __init__(self,maze_file_path:str,rewards_scaled=False, pass_through_walls: bool = False):
+    def __init__(self,maze_file_path:str,rewards_scaled=False, pass_through_walls: bool = False,
+                 reward_shaping: bool = False, shaping_gamma: float = 0.99):
         """If pass_through_walls is True the agent may move into cells that are walls.
         Behavior:
          - Movement into WALL cells is allowed (unless out-of-bounds).
          - WALL cells, when passed-through, are treated as OPEN for reward calculation.
          - Leaving the grid (out-of-bounds) is still treated as a WALL and blocked.
+
+        If reward_shaping is True, applies potential-based shaping (Ng et al. 1999):
+            F(s, s') = shaping_gamma * Phi(s') - Phi(s)
+        with Phi(s) = -manhattan(s, goal) / max_dist  in [-1, 0].
+        Preserves the optimal policy while providing a dense directional signal.
         """
         super().__init__(maze_file_path)
         self.rewards_scaled     = rewards_scaled
         self.pass_through_walls = pass_through_walls
+        self.reward_shaping     = reward_shaping
+        self.shaping_gamma      = float(shaping_gamma)
 
         if self.file_loaded:
             coords = np.where(self.grid == GridCell.START.value)
             self.agent_start = (int(coords[0][0]), int(coords[1][0]))
-            
+
             coords = np.where(self.grid == GridCell.GOAL.value)
             self.agent_goal = (int(coords[0][0]), int(coords[1][0]))
-            
+
             self.walls_count = np.sum(self.grid == GridCell.WALL.value)
             self.opens_count = np.sum(self.grid == GridCell.OPEN.value)
+
+            # Manhattan-distance bound used to normalize the potential into [-1, 0].
+            self._max_manhattan = max(1, (self.rows - 1) + (self.cols - 1))
     
     def debug(self):
         super().debug()
@@ -114,6 +125,22 @@ class MazeEnv(Grid):
         else:
             return cell_t.reward
     
+    def potential(self, state: Tuple[int,int]) -> float:
+        """Phi(s) = -manhattan(s, goal) / max_dist  in [-1, 0].
+        Goal has potential 0; cells far from goal have potential -1.
+        Returns 0.0 when reward_shaping is disabled (no-op for callers)."""
+        if not self.reward_shaping:
+            return 0.0
+        dr = abs(state[0] - self.agent_goal[0])
+        dc = abs(state[1] - self.agent_goal[1])
+        return -float(dr + dc) / float(self._max_manhattan)
+
+    def shaping_bonus(self, state: Tuple[int,int], next_state: Tuple[int,int]) -> float:
+        """F(s, s') = gamma * Phi(s') - Phi(s). Zero when shaping is off."""
+        if not self.reward_shaping:
+            return 0.0
+        return self.shaping_gamma * self.potential(next_state) - self.potential(state)
+
     def getStateGridCell(self,state:Tuple[int,int]) -> GridCell:
         out = (
             state[0] < 0 or
@@ -155,5 +182,10 @@ class MazeEnv(Grid):
             else:
                 reward = self.getCellReward(cell_t)
                 next_state_final = next_state
+
+        # Potential-based shaping: gamma * Phi(s') - Phi(s).
+        # Adds a directional signal toward the goal without changing the optimal policy.
+        if self.reward_shaping:
+            reward += self.shaping_bonus(state, next_state_final)
 
         return StepResult(reward=reward, nextState=next_state_final, isGoal=is_goal)
